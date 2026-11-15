@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
@@ -109,7 +110,9 @@ fun SearchScreen(
     LaunchedEffect(inputFocused) {
         // A focused BasicTextField normally asks for the IME itself; show()
         // covers TV launchers / remote-only devices that need the extra nudge.
-        if (inputFocused) keyboard?.show()
+        // Hiding it on the way out matters just as much: a full-height IME
+        // covers the lower keyboard rows and the action keys on a TV.
+        if (inputFocused) keyboard?.show() else keyboard?.hide()
     }
 
     // Remember where each key sits so the chain can be built.
@@ -151,10 +154,34 @@ fun SearchScreen(
         requesters[0].requestFocus()
     }
 
+    /**
+     * BasicTextField consumes DPAD keys to move the caret, so directional focus
+     * search never runs while the IME owns the field and a remote user gets
+     * trapped in it. Intercept DOWN in the preview (capture) phase — before the
+     * text field sees the event — and hand focus to the strip / board.
+     */
+    fun leaveFieldOnDown(): Boolean {
+        val target = if (suggestions.isNotEmpty()) {
+            suggestionRequesters[0]
+        } else {
+            requesters[0]
+        }
+        target.requestFocus()
+        return true
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(start = 32.dp, end = 32.dp, top = 24.dp, bottom = 20.dp)
+            .onPreviewKeyEvent { event ->
+                if (!inputFocused || event.type != KeyEventType.KeyDown ||
+                    event.nativeKeyEvent.keyCode != KeyEvent.KEYCODE_DPAD_DOWN
+                ) {
+                    return@onPreviewKeyEvent false
+                }
+                leaveFieldOnDown()
+            }
             .onKeyEvent { event ->
                 if (inputFocused) return@onKeyEvent false
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
@@ -208,6 +235,17 @@ fun SearchScreen(
                     } else {
                         requesters[0]
                     }
+                }
+                .onPreviewKeyEvent { event ->
+                    // Second capture point, right on the field itself. The root
+                    // preview normally wins; this keeps the behaviour if the
+                    // field is ever used without that wrapper.
+                    if (!inputFocused || event.type != KeyEventType.KeyDown ||
+                        event.nativeKeyEvent.keyCode != KeyEvent.KEYCODE_DPAD_DOWN
+                    ) {
+                        return@onPreviewKeyEvent false
+                    }
+                    leaveFieldOnDown()
                 }
                 .onFocusChanged { inputFocused = it.isFocused },
             textStyle = TextStyle(
