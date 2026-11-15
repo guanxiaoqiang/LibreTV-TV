@@ -240,7 +240,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             keyword = state.searchedKeyword,
             results = state.results,
             searching = state.searching,
-            showBadges = state.posterBadgesEnabled,
+            badgeVisibility = state.badgeVisibility,
             // Douban-driven results return to the recommend page they came
             // from; keyboard-driven results keep the normal results <- detail
             // <- search chain.
@@ -363,11 +363,11 @@ fun TvApp(vm: TvViewModel = viewModel()) {
 
         Screen.SETTINGS -> SettingsScreen(
             adFilterEnabled = state.adFilterEnabled,
-            posterBadgesEnabled = state.posterBadgesEnabled,
+            badgeVisibility = state.badgeVisibility,
             sourceCount = state.sourceEntries.size,
             enabledSourceCount = state.sourceEntries.count { it.enabled },
             onToggleAdFilter = { vm.setAdFilterEnabled(!state.adFilterEnabled) },
-            onTogglePosterBadges = { vm.setPosterBadgesEnabled(!state.posterBadgesEnabled) },
+            onToggleBadge = { tag, visible -> vm.setBadgeVisible(tag, visible) },
             onOpenSources = { vm.navigate(Screen.SOURCES) },
             onBack = { vm.back() }
         )
@@ -653,7 +653,7 @@ private fun HomeFeedPage(
                     UnifiedPosterCard(
                         card = card,
                         focused = focused,
-                        showBadges = state.posterBadgesEnabled,
+                        badgeVisibility = state.badgeVisibility,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }

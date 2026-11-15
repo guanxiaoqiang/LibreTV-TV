@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.libretv.tv.data.AppSettings
+import com.libretv.tv.data.BadgeTag
+import com.libretv.tv.data.BadgeVisibility
 import com.libretv.tv.data.CategoryCatalog
 import com.libretv.tv.data.aggregate
 import com.libretv.tv.data.CmsClient
@@ -68,8 +70,8 @@ data class UiState(
     val testingSource: String? = null,
     /** Strip ad segments out of HLS playlists. */
     val adFilterEnabled: Boolean = true,
-    /** Show the metadata tags on the poster artwork. */
-    val posterBadgesEnabled: Boolean = true,
+    /** Which poster metadata tags are visible. */
+    val badgeVisibility: BadgeVisibility = BadgeVisibility(),
     val query: String = "",
     val t9Buffer: String = "",
     val t9LastDigit: Int? = null,
@@ -235,7 +237,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     init {
         _state.value = _state.value.copy(
             adFilterEnabled = appSettings.adFilterEnabled,
-            posterBadgesEnabled = appSettings.posterBadgesEnabled
+            badgeVisibility = appSettings.badgeVisibility
         )
         viewModelScope.launch {
             val loaded = repo.loadSources()
@@ -734,9 +736,9 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         poster = subject.cover,
         cornerBadge = subject.rate.takeIf { it.isNotBlank() },
         badges = listOf(
-            FeedBadge(subject.year.ifBlank { "新片" }, FeedBadgeKind.NEUTRAL),
-            FeedBadge("豆瓣推荐", FeedBadgeKind.ACCENT),
-            FeedBadge("全网搜源", FeedBadgeKind.LATENCY)
+            FeedBadge(subject.year.ifBlank { "新片" }, FeedBadgeKind.NEUTRAL, BadgeTag.YEAR),
+            FeedBadge("豆瓣推荐", FeedBadgeKind.ACCENT, BadgeTag.DOUBAN),
+            FeedBadge("全网搜源", FeedBadgeKind.LATENCY, BadgeTag.SOURCES)
         ),
         subject = subject
     )
@@ -1151,7 +1153,13 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setPosterBadgesEnabled(enabled: Boolean) {
         appSettings.posterBadgesEnabled = enabled
-        _state.value = _state.value.copy(posterBadgesEnabled = enabled)
+        _state.value = _state.value.copy(badgeVisibility = appSettings.badgeVisibility)
+    }
+
+    /** Switch a single poster tag on or off. */
+    fun setBadgeVisible(tag: BadgeTag, visible: Boolean) {
+        appSettings.badgeVisibility = appSettings.badgeVisibility.with(tag, visible)
+        _state.value = _state.value.copy(badgeVisibility = appSettings.badgeVisibility)
     }
 
     // ---------- source management ----------

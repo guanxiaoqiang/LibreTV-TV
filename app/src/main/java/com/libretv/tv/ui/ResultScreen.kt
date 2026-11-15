@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.libretv.tv.data.BadgeVisibility
 import com.libretv.tv.data.SearchResult
 import com.libretv.tv.data.TitleGroup
 import com.libretv.tv.data.aggregate
@@ -43,7 +44,7 @@ fun ResultScreen(
     keyword: String,
     results: List<SearchResult>,
     searching: Boolean,
-    showBadges: Boolean = true,
+    badgeVisibility: BadgeVisibility = BadgeVisibility(),
     onOpenGroup: (TitleGroup) -> Unit,
     onBack: () -> Unit
 ) {
@@ -134,7 +135,7 @@ fun ResultScreen(
                     UnifiedPosterCard(
                         card = card,
                         focused = focused,
-                        showBadges = showBadges,
+                        badgeVisibility = badgeVisibility,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }

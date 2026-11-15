@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,13 +30,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.libretv.tv.data.SourceEntry
 import com.libretv.tv.data.SourceHealth
 
@@ -60,6 +69,8 @@ fun SourcesScreen(
     onBack: () -> Unit
 ) {
     var showAdd by remember { mutableStateOf(false) }
+    // Removing a collector is destructive, so it goes through a confirmation.
+    var pendingRemove by remember { mutableStateOf<SourceEntry?>(null) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -113,6 +124,9 @@ fun SourcesScreen(
             } else {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
+                    // Side padding leaves room for the 1.06x focused row to
+                    // grow without being clipped by the screen edge.
+                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     itemsIndexed(entries, key = { _, e -> e.url }) { _, entry ->
@@ -122,7 +136,7 @@ fun SourcesScreen(
                             testing = testingUrl == entry.url,
                             onToggle = { onToggleSource(entry.url, !entry.enabled) },
                             onTest = { onTestSource(entry.url) },
-                            onRemove = { onRemoveSource(entry.url) }
+                            onRemove = { pendingRemove = entry }
                         )
                     }
                 }
@@ -139,10 +153,29 @@ fun SourcesScreen(
                 onCancel = { showAdd = false }
             )
         }
+
+        pendingRemove?.let { target ->
+            RemoveSourceDialog(
+                entry = target,
+                onConfirm = {
+                    onRemoveSource(target.url)
+                    pendingRemove = null
+                },
+                onCancel = { pendingRemove = null }
+            )
+        }
     }
 }
 
-/** One collector with its switch, test button and remove button. */
+/**
+ * One collector with its switch, test button and remove button.
+ *
+ * The three action buttons are *siblings* of the focusable name area, not its
+ * children. A focusable parent swallows the directional focus search for its
+ * whole subtree, so nesting the buttons inside it would make them unreachable
+ * with the D-pad. As siblings the LEFT / RIGHT keys walk through
+ * 禁用 → 测试 → 删除 and BACK OUT of the row on the left side.
+ */
 @Composable
 private fun SourceRow(
     entry: SourceEntry,
@@ -152,66 +185,101 @@ private fun SourceRow(
     onTest: () -> Unit,
     onRemove: () -> Unit
 ) {
-    FocusableTile(onClick = onTest) { f ->
-        Row(
+    var nameFocused by remember { mutableStateOf(false) }
+    var toggleFocused by remember { mutableStateOf(false) }
+    var testFocused by remember { mutableStateOf(false) }
+    var removeFocused by remember { mutableStateOf(false) }
+    val rowFocused = nameFocused || toggleFocused || testFocused || removeFocused
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (rowFocused) TvColors.SurfaceHigh else TvColors.Surface)
+            .border(
+                width = if (rowFocused) 2.dp else 0.dp,
+                color = if (rowFocused) TvColors.FocusRing else Color.Transparent,
+                shape = RoundedCornerShape(8.dp)
+            )
+            // The whole row grows together, so the D-pad focus always shows
+            // which collector is active. The side padding on the list keeps
+            // the enlarged row clear of the screen edge.
+            .scale(if (rowFocused) 1.03f else 1f)
+            .zIndex(if (rowFocused) 5f else 0f)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        FocusableTile(
+            onClick = onTest,
+            scaleWhenFocused = 1f,
             modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
-                .border(
-                    width = if (f) 2.dp else 0.dp,
-                    color = if (f) TvColors.FocusRing else Color.Transparent,
-                    shape = RoundedCornerShape(8.dp)
+                .weight(1f)
+                .onFocusChanged { nameFocused = it.isFocused }
+        ) { f ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .width(8.dp)
+                        .height(8.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                !entry.enabled -> TvColors.OnSurfaceMuted
+                                health == null -> TvColors.Warning
+                                health.reachable -> TvColors.Success
+                                else -> TvColors.Danger
+                            }
+                        )
                 )
-                .tvFocusable(f, RoundedCornerShape(8.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .width(8.dp)
-                    .height(8.dp)
-                    .clip(CircleShape)
-                    .background(
-                        when {
-                            !entry.enabled -> TvColors.OnSurfaceMuted
-                            health == null -> TvColors.Warning
-                            health.reachable -> TvColors.Success
-                            else -> TvColors.Danger
-                        }
-                    )
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                entry.name,
-                color = if (entry.enabled) {
-                    if (f) TvColors.Primary else TvColors.OnSurface
-                } else {
-                    TvColors.OnSurfaceMuted
-                },
-                fontSize = 14.sp,
-                modifier = Modifier.width(160.dp)
-            )
-            Text(
-                entry.url,
-                color = TvColors.OnSurfaceMuted,
-                fontSize = 12.sp,
-                maxLines = 1,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(10.dp))
-            HealthLabel(health = health, testing = testing)
-            Spacer(Modifier.width(10.dp))
-            if (entry.custom) {
-                MiniTag(text = "自建", color = TvColors.Info)
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    entry.name,
+                    color = if (entry.enabled) {
+                        if (f) TvColors.Primary else TvColors.OnSurface
+                    } else {
+                        TvColors.OnSurfaceMuted
+                    },
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(160.dp)
+                )
+                Text(
+                    entry.url,
+                    color = TvColors.OnSurfaceMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(10.dp))
+                HealthLabel(health = health, testing = testing)
+                if (entry.custom) {
+                    Spacer(Modifier.width(8.dp))
+                    MiniTag(text = "自建", color = TvColors.Info)
+                }
             }
-            MiniButton(label = if (entry.enabled) "禁用" else "启用", onClick = onToggle)
-            Spacer(Modifier.width(8.dp))
-            MiniButton(label = "测试", onClick = onTest)
-            Spacer(Modifier.width(8.dp))
-            MiniButton(label = "删除", onClick = onRemove, danger = true)
         }
+
+        Spacer(Modifier.width(10.dp))
+        MiniButton(
+            label = if (entry.enabled) "禁用" else "启用",
+            onClick = onToggle,
+            onFocusChange = { toggleFocused = it }
+        )
+        Spacer(Modifier.width(8.dp))
+        MiniButton(
+            label = "测试",
+            onClick = onTest,
+            onFocusChange = { testFocused = it }
+        )
+        Spacer(Modifier.width(8.dp))
+        MiniButton(
+            label = "删除",
+            onClick = onRemove,
+            danger = true,
+            onFocusChange = { removeFocused = it }
+        )
     }
 }
 
@@ -261,8 +329,17 @@ private fun MiniTag(text: String, color: Color) {
 
 /** Small action button inside a source row. */
 @Composable
-private fun MiniButton(label: String, onClick: () -> Unit, danger: Boolean = false) {
-    FocusableTile(onClick = onClick, scaleWhenFocused = 1.06f) { f ->
+private fun MiniButton(
+    label: String,
+    onClick: () -> Unit,
+    danger: Boolean = false,
+    onFocusChange: ((Boolean) -> Unit)? = null
+) {
+    FocusableTile(
+        onClick = onClick,
+        scaleWhenFocused = 1.06f,
+        modifier = Modifier.onFocusChanged { onFocusChange?.invoke(it.isFocused) }
+    ) { f ->
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
@@ -306,6 +383,100 @@ private fun HeaderButton(label: String, onClick: () -> Unit) {
                 fontSize = 14.sp
             )
         }
+    }
+}
+
+/**
+ * Confirmation before a collector is removed.
+ *
+ * Removing a collector changes what the search and the category pages can
+ * find, so it always takes two steps: the row's 删除 button opens this
+ * overlay, and only the overlay's 删除 button actually removes it.
+ */
+@Composable
+private fun RemoveSourceDialog(
+    entry: SourceEntry,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val confirmRequester = remember { FocusRequester() }
+    val cancelRequester = remember { FocusRequester() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xCC000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(480.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(TvColors.Surface)
+                .border(1.dp, TvColors.SurfaceHigh, RoundedCornerShape(14.dp))
+                .padding(24.dp)
+        ) {
+            Text(
+                "删除采集源？",
+                color = TvColors.OnSurface,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "「${entry.name}」将从列表中移除，不再参与搜索与分类聚合。" +
+                    if (entry.custom) "自建源删除后无法自动恢复。" else "内置源删除后可在「恢复默认」中找回。",
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FocusableTile(
+                    onClick = onConfirm,
+                    modifier = Modifier
+                        .focusRequester(confirmRequester)
+                        .focusProperties { right = cancelRequester }
+                ) { f ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (f) TvColors.Danger else TvColors.SurfaceHigh)
+                            .tvFocusable(f, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 22.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            "确认删除",
+                            color = if (f) Color(0xFF14181D) else TvColors.Danger,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+                FocusableTile(
+                    onClick = onCancel,
+                    modifier = Modifier
+                        .focusRequester(cancelRequester)
+                        .focusProperties { left = confirmRequester }
+                ) { f ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
+                            .tvFocusable(f, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 22.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            "取消",
+                            color = if (f) TvColors.Primary else TvColors.OnSurface,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(entry.url) {
+        runCatching { cancelRequester.requestFocus() }
     }
 }
 

@@ -12,7 +12,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -22,6 +24,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.libretv.tv.data.BadgeTag
+import com.libretv.tv.data.BadgeVisibility
 
 /**
  * Settings page.
@@ -29,15 +33,18 @@ import androidx.compose.ui.unit.sp
  * Every switch of the app is laid out flat on this page — nothing hides
  * behind a sub-menu — except the collector list, which has its own page
  * because it is a long, editable list.
+ *
+ * The poster tags are configured one by one: the viewer can keep the quality
+ * but drop the latency, and so on.
  */
 @Composable
 fun SettingsScreen(
     adFilterEnabled: Boolean,
-    posterBadgesEnabled: Boolean,
+    badgeVisibility: BadgeVisibility,
     sourceCount: Int,
     enabledSourceCount: Int,
     onToggleAdFilter: () -> Unit,
-    onTogglePosterBadges: () -> Unit,
+    onToggleBadge: (BadgeTag, Boolean) -> Unit,
     onOpenSources: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -80,19 +87,57 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(18.dp))
 
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.verticalScroll(rememberScrollState())
+        ) {
             SettingsToggleRow(
                 title = "广告切片过滤",
                 description = "按广告分片 URL、片头插入、超短中插识别 HLS 广告段落，只删广告并保留时间轴",
                 value = adFilterEnabled,
                 onToggle = onToggleAdFilter
             )
+
+            SectionLabel("海报标签", "已开启 ${badgeVisibility.enabledCount} / 5 项")
+
             SettingsToggleRow(
-                title = "海报标签显示",
-                description = "在海报上显示上映年份、源数量、最高清晰度与最小延时；关闭后海报只保留标题",
-                value = posterBadgesEnabled,
-                onToggle = onTogglePosterBadges
+                title = "上映年份",
+                description = "在海报上显示影片上映年份",
+                value = badgeVisibility.year,
+                onToggle = { onToggleBadge(BadgeTag.YEAR, !badgeVisibility.year) },
+                compact = true
             )
+            SettingsToggleRow(
+                title = "源数量",
+                description = "在海报上显示该片可播放的源数量",
+                value = badgeVisibility.sources,
+                onToggle = { onToggleBadge(BadgeTag.SOURCES, !badgeVisibility.sources) },
+                compact = true
+            )
+            SettingsToggleRow(
+                title = "最高清晰度",
+                description = "在海报上显示所有源里最好的画质",
+                value = badgeVisibility.quality,
+                onToggle = { onToggleBadge(BadgeTag.QUALITY, !badgeVisibility.quality) },
+                compact = true
+            )
+            SettingsToggleRow(
+                title = "最小延时",
+                description = "在海报上显示响应最快的那个源的实测延迟",
+                value = badgeVisibility.latency,
+                onToggle = { onToggleBadge(BadgeTag.LATENCY, !badgeVisibility.latency) },
+                compact = true
+            )
+            SettingsToggleRow(
+                title = "豆瓣推荐标签",
+                description = "在豆瓣推荐卡片上显示「豆瓣推荐」与「全网搜源」标记",
+                value = badgeVisibility.douban,
+                onToggle = { onToggleBadge(BadgeTag.DOUBAN, !badgeVisibility.douban) },
+                compact = true
+            )
+
+            SectionLabel("采集源", "$enabledSourceCount / $sourceCount 已启用")
+
             SettingsEntryRow(
                 title = "源设置",
                 description = "添加 / 删除 / 启用禁用采集源，并可单独测试每个源的连通性与延迟",
@@ -103,13 +148,32 @@ fun SettingsScreen(
     }
 }
 
+/** Small heading that separates groups of settings. */
+@Composable
+private fun SectionLabel(title: String, hint: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+    ) {
+        Text(
+            title,
+            color = TvColors.Primary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(hint, color = TvColors.OnSurfaceMuted, fontSize = 12.sp)
+    }
+}
+
 /** One settings row with a switch. */
 @Composable
 private fun SettingsToggleRow(
     title: String,
     description: String,
     value: Boolean,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    compact: Boolean = false
 ) {
     FocusableTile(onClick = onToggle, scaleWhenFocused = 1.02f) { f ->
         Row(
@@ -123,7 +187,10 @@ private fun SettingsToggleRow(
                     shape = RoundedCornerShape(10.dp)
                 )
                 .tvFocusable(f, RoundedCornerShape(10.dp))
-                .padding(horizontal = 18.dp, vertical = 14.dp),
+                .padding(
+                    horizontal = 18.dp,
+                    vertical = if (compact) 10.dp else 14.dp
+                ),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {

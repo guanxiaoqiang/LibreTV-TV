@@ -25,13 +25,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.libretv.tv.data.BadgeTag
+import com.libretv.tv.data.BadgeVisibility
 import com.libretv.tv.data.DoubanSubject
 import com.libretv.tv.data.TitleGroup
 
 /** Colour role of a small tag drawn on the poster. */
 enum class FeedBadgeKind { NEUTRAL, ACCENT, QUALITY, LATENCY }
 
-data class FeedBadge(val text: String, val kind: FeedBadgeKind = FeedBadgeKind.NEUTRAL)
+/**
+ * One small tag on the poster.
+ *
+ * [tag] is the identity of the information the tag carries, so the settings
+ * page can switch the year, the source count, the quality and the latency
+ * independently.
+ */
+data class FeedBadge(
+    val text: String,
+    val kind: FeedBadgeKind = FeedBadgeKind.NEUTRAL,
+    val tag: BadgeTag? = null
+)
 
 /**
  * One card in the unified home grid.
@@ -67,10 +80,10 @@ fun TitleGroup.asFeedCard(): FeedCard = FeedCard(
     title = title,
     poster = poster,
     badges = listOf(
-        FeedBadge(year.ifBlank { "年份未知" }, FeedBadgeKind.NEUTRAL),
-        FeedBadge("$playableCount 源", FeedBadgeKind.ACCENT),
-        FeedBadge(bestQuality.short, FeedBadgeKind.QUALITY),
-        FeedBadge(shortLatency(fastestMs), FeedBadgeKind.LATENCY)
+        FeedBadge(year.ifBlank { "年份未知" }, FeedBadgeKind.NEUTRAL, BadgeTag.YEAR),
+        FeedBadge("$playableCount 源", FeedBadgeKind.ACCENT, BadgeTag.SOURCES),
+        FeedBadge(bestQuality.short, FeedBadgeKind.QUALITY, BadgeTag.QUALITY),
+        FeedBadge(shortLatency(fastestMs), FeedBadgeKind.LATENCY, BadgeTag.LATENCY)
     ),
     group = this
 )
@@ -113,7 +126,7 @@ private fun BadgeChip(badge: FeedBadge) {
 fun UnifiedPosterCard(
     card: FeedCard,
     focused: Boolean,
-    showBadges: Boolean = true,
+    badgeVisibility: BadgeVisibility = BadgeVisibility(),
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -176,8 +189,8 @@ fun UnifiedPosterCard(
 
         // Two badges per row keeps four metadata tags readable on a 150 dp
         // card. The title bar below them uses the same chip backing colour.
-        // The whole tag block can be switched off in the settings, which
-        // leaves a clean poster with just the title.
+        // Every tag has its own switch in the settings, so the block can be
+        // trimmed down to just the information the viewer cares about.
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -185,13 +198,14 @@ fun UnifiedPosterCard(
                 .padding(6.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            if (showBadges) {
-                card.badges.chunked(2).forEach { row ->
+            card.badges
+                .filter { badgeVisibility.allows(it.tag) }
+                .chunked(2)
+                .forEach { row ->
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         row.forEach { BadgeChip(it) }
                     }
                 }
-            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
