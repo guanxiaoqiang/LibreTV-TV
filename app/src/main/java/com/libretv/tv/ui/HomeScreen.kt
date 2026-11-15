@@ -55,6 +55,7 @@ fun FocusableTile(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     scaleWhenFocused: Float = 1.09f,
+    onLongPress: (() -> Unit)? = null,
     content: @Composable (focused: Boolean) -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -63,7 +64,11 @@ fun FocusableTile(
             .zIndex(if (focused) 10f else 0f)
             .scale(if (focused) scaleWhenFocused else 1f)
             .onFocusChanged { state -> focused = state.isFocused }
-            .focusableItem(enabled = enabled, onClick = onClick)
+            .focusableItem(
+                enabled = enabled,
+                onLongPress = onLongPress,
+                onClick = onClick
+            )
     ) {
         content(focused)
     }

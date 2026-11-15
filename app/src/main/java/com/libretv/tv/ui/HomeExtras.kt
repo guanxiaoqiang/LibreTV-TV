@@ -19,18 +19,29 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items as lazyItems
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -226,7 +237,7 @@ fun HistoryShelf(
     }
 }
 
-/** Full history tab: a grid of resumable cards plus per-item removal. */
+/** Full history tab: a grid of resumable cards. */
 @Composable
 fun HistoryPage(
     records: List<WatchRecord>,
@@ -246,111 +257,239 @@ fun HistoryPage(
             visible.filter { it.offset.x == leftX }.map { it.index }.toSet()
         }
     }
-    Column(modifier = modifier.fillMaxSize()) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 44.dp, end = 40.dp, top = 8.dp, bottom = 14.dp)
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "历史播放记录",
-                    color = TvColors.OnSurface,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    "点击任意记录从上次位置继续播放 · 共 ${records.size} 条",
-                    color = TvColors.OnSurfaceMuted,
-                    fontSize = 13.sp
-                )
-            }
-            if (records.isNotEmpty()) {
-                val rail = leftTarget
-                FocusableTile(
-                    onClick = onClear,
-                    modifier = Modifier.focusProperties {
-                        if (rail != null) left = rail
+
+    // The removal entry is hidden by default. A long press on the card or the
+    // remote's MENU key opens a small confirmation overlay for that one
+    // record; the grid itself stays clean.
+    var pendingDelete by remember { mutableStateOf<WatchRecord?>(null) }
+    // Which card owns the focus right now — the MENU key acts on it.
+    var focusedKey by remember { mutableStateOf<String?>(null) }
+
+    // BACK closes the removal overlay first; only when no overlay is up does
+    // the normal "leave the tab" behaviour apply.
+    BackHandler(enabled = pendingDelete != null) {
+        pendingDelete = null
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            // The remote's MENU key opens the removal overlay for the focused
+            // card. Pressing it again closes the overlay.
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown &&
+                    (event.key == Key.Menu || event.key == Key.Settings || event.key == Key.Function)
+                ) {
+                    val current = pendingDelete
+                    if (current != null) {
+                        pendingDelete = null
+                        true
+                    } else {
+                        val key = focusedKey
+                        val target = records.firstOrNull { it.key == key }
+                        if (target != null) {
+                            pendingDelete = target
+                            true
+                        } else {
+                            false
+                        }
                     }
+                } else {
+                    false
+                }
+            }
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 44.dp, end = 40.dp, top = 8.dp, bottom = 14.dp)
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "历史播放记录",
+                        color = TvColors.OnSurface,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        "点击从上次位置继续播放 · 长按卡片或按菜单键可删除该条记录 · 共 ${records.size} 条",
+                        color = TvColors.OnSurfaceMuted,
+                        fontSize = 13.sp
+                    )
+                }
+                if (records.isNotEmpty()) {
+                    val rail = leftTarget
+                    FocusableTile(
+                        onClick = onClear,
+                        modifier = Modifier.focusProperties {
+                            if (rail != null) left = rail
+                        }
+                    ) { focused ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (focused) TvColors.SurfaceHigh else TvColors.Surface)
+                                .tvFocusable(focused, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 16.dp, vertical = 9.dp)
+                        ) {
+                            Text(
+                                "清空记录",
+                                color = if (focused) TvColors.Danger else TvColors.OnSurfaceMuted,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (records.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(60.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "还没有播放记录，去看一部片子吧",
+                        color = TvColors.OnSurfaceMuted,
+                        fontSize = 15.sp
+                    )
+                }
+                return@Column
+            }
+
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(HISTORY_CARD_WIDTH + 12.dp),
+                state = gridState,
+                contentPadding = PaddingValues(
+                    start = 44.dp, end = 40.dp, top = 12.dp, bottom = 40.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(22.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                gridItemsIndexed(records, key = { _, record -> record.key }) { index, record ->
+                    val rail = leftTarget
+                    val toRail = Modifier.focusProperties {
+                        if (rail != null && index in firstColumnIndices) left = rail
+                    }
+                    FocusableTile(
+                        onClick = { onResume(record) },
+                        onLongPress = { pendingDelete = record },
+                        modifier = toRail.onFocusChanged { state ->
+                            if (state.isFocused) focusedKey = record.key
+                        }
+                    ) { focused ->
+                        HistoryCard(record = record, focused = focused)
+                    }
+                }
+            }
+        }
+
+        // MENU / 长按 confirmation overlay.
+        pendingDelete?.let { target ->
+            HistoryDeleteOverlay(
+                record = target,
+                onConfirm = {
+                    onDelete(target.key)
+                    pendingDelete = null
+                },
+                    onDismiss = { pendingDelete = null }
+            )
+        }
+    }
+}
+
+/**
+ * Small modal that asks whether the highlighted record should be removed.
+ * The overlay owns the focus while it is up, so the D-pad stays inside it
+ * and BACK dismisses it instead of leaving the history tab.
+ */
+@Composable
+private fun HistoryDeleteOverlay(
+    record: WatchRecord,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val deleteRequester = remember { FocusRequester() }
+    val cancelRequester = remember { FocusRequester() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xCC0B0E12)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(360.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(TvColors.Surface)
+                .padding(20.dp)
+        ) {
+            Text(
+                "删除这条记录？",
+                color = TvColors.OnSurface,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                record.title,
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 13.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                FocusableTile(
+                    onClick = onConfirm,
+                    modifier = Modifier
+                        .focusRequester(deleteRequester)
+                        .focusProperties { right = cancelRequester }
+                ) { focused ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (focused) TvColors.Danger else TvColors.SurfaceHigh)
+                            .tvFocusable(focused, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 22.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            "删除",
+                            color = if (focused) Color.White else TvColors.Danger,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+                FocusableTile(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .focusRequester(cancelRequester)
+                        .focusProperties { left = deleteRequester }
                 ) { focused ->
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .background(if (focused) TvColors.SurfaceHigh else TvColors.Surface)
                             .tvFocusable(focused, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 16.dp, vertical = 9.dp)
+                            .padding(horizontal = 22.dp, vertical = 10.dp)
                     ) {
                         Text(
-                            "清空记录",
-                            color = if (focused) TvColors.Danger else TvColors.OnSurfaceMuted,
-                            fontSize = 13.sp
+                            "取消",
+                            color = if (focused) TvColors.Primary else TvColors.OnSurfaceMuted,
+                            fontSize = 14.sp
                         )
                     }
                 }
             }
         }
+    }
 
-        if (records.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(60.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "还没有播放记录，去看一部片子吧",
-                    color = TvColors.OnSurfaceMuted,
-                    fontSize = 15.sp
-                )
-            }
-            return
-        }
-
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(HISTORY_CARD_WIDTH + 12.dp),
-            state = gridState,
-            contentPadding = PaddingValues(
-                start = 44.dp, end = 40.dp, top = 12.dp, bottom = 40.dp
-            ),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(22.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            gridItemsIndexed(records, key = { _, record -> record.key }) { index, record ->
-                val rail = leftTarget
-                val toRail = Modifier.focusProperties {
-                    if (rail != null && index in firstColumnIndices) left = rail
-                }
-                Column {
-                    FocusableTile(
-                        onClick = { onResume(record) },
-                        modifier = toRail
-                    ) { focused ->
-                        HistoryCard(record = record, focused = focused)
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    FocusableTile(
-                        onClick = { onDelete(record.key) },
-                        modifier = toRail
-                    ) { focused ->
-                        Box(
-                            modifier = Modifier
-                                .width(HISTORY_CARD_WIDTH)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (focused) TvColors.SurfaceHigh else TvColors.Surface)
-                                .tvFocusable(focused, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 10.dp, vertical = 5.dp)
-                        ) {
-                            Text(
-                                "移除这条记录",
-                                color = if (focused) TvColors.Danger else TvColors.OnSurfaceMuted,
-                                fontSize = 11.sp
-                            )
-                        }
-                    }
-                }
-            }
-        }
+    LaunchedEffect(record.key) {
+        runCatching { deleteRequester.requestFocus() }
     }
 }
 
