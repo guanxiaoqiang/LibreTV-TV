@@ -68,15 +68,17 @@ class DoubanClient(
     suspend fun recommendations(
         tag: String,
         limit: Int = 20,
-        type: String = "movie"
+        type: String = "movie",
+        pageStart: Int = 0
     ): List<DoubanSubject> =
         withContext(Dispatchers.IO) {
             try {
                 // The tag is Chinese text, so it has to be percent encoded or the
-                // request comes back as an empty list.
+                // request comes back as an empty list. page_start drives the
+                // segmented loading of each genre strip.
                 val encodedTag = java.net.URLEncoder.encode(tag, "UTF-8")
                 val url = "$BASE?type=$type&tag=$encodedTag&sort=recommend" +
-                    "&page_limit=$limit&page_start=0"
+                    "&page_limit=$limit&page_start=$pageStart"
                 val req = Request.Builder()
                     .url(url)
                     .header("User-Agent", CmsClient.USER_AGENT)

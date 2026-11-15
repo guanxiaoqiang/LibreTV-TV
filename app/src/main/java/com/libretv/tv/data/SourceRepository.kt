@@ -153,11 +153,12 @@ class SourceRepository(private val context: Context) {
     suspend fun categoryShelf(
         source: SourceConfig,
         typeId: Int,
-        client: CmsClient
+        client: CmsClient,
+        page: Int = 1
     ): List<SearchResult> = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
         val items = try {
-            client.categoryItems(source.url, typeId)
+            client.categoryItems(source.url, typeId, page)
         } catch (e: Exception) {
             emptyList()
         }

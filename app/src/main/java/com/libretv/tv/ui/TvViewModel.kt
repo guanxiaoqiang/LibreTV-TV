@@ -29,30 +29,24 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class Screen { HOME, SEARCH, RESULT, SOURCE_PICKER, DETAIL, PLAYER, SOURCES }
 
 /**
- * Home screen tabs, in left-rail display order.
- *
- * The category tabs map onto the collector's own category tree; RECOMMEND keeps
- * the Douban discovery shelves and HISTORY shows the local continue-watching
- * list. doubanType / doubanTags feed a fallback shelf so a tab never ends up
- * completely blank when a collector is unreachable.
+ * Pages in left-rail order. [doubanType] selects the movie / tv feed used by
+ * the recommend page and by the discovery fallback when a collector has no
+ * matching sub-category for the selected genre.
  */
-enum class HomeTab(
-    val label: String,
-    val doubanType: String,
-    val doubanTags: List<String>
-) {
-    RECOMMEND("推荐", "movie", emptyList()),
-    HISTORY("历史", "movie", emptyList()),
-    MOVIE("电影", "movie", listOf("热门", "高分", "喜剧")),
-    SERIES("剧集", "tv", listOf("热门", "国产剧")),
-    VARIETY("综艺", "tv", listOf("综艺", "最新")),
-    ANIME("动漫", "movie", listOf("动画", "高分")),
-    DOCUMENTARY("纪录片", "movie", listOf("纪录片", "高分")),
-    SHORT("短剧", "tv", listOf("最新"))
+enum class HomeTab(val label: String, val doubanType: String) {
+    RECOMMEND("推荐", "movie"),
+    HISTORY("历史", "movie"),
+    MOVIE("电影", "movie"),
+    SERIES("剧集", "tv"),
+    VARIETY("综艺", "tv"),
+    ANIME("动漫", "movie"),
+    DOCUMENTARY("纪录片", "movie"),
+    SHORT("短剧", "tv")
 }
 
 data class UiState(
@@ -71,20 +65,22 @@ data class UiState(
     val error: String? = null,
     val health: Map<String, Boolean> = emptyMap(),
     val checkingHealth: Boolean = false,
-    val doubanRows: List<DoubanRow> = emptyList(),
-    val doubanLoading: Boolean = false,
     val homeTab: HomeTab = HomeTab.RECOMMEND,
-    /** Source that supplied the reference category tree (display only). */
-    val categorySource: SourceConfig? = null,
-    /** All-source fan-out: one card per title, no matter how many APIs carry it. */
+    /** Selected chip at the top of the content page. */
+    val genre: String = "热门",
+    /** Cards currently loaded for this tab + genre (all of them, not just visible). */
+    val feed: List<FeedCard> = emptyList(),
+    /** How many of [feed] the grid is allowed to show; grows in segments. */
+    val feedVisible: Int = 0,
+    val feedLoading: Boolean = false,
+    val feedLoadingMore: Boolean = false,
+    val feedHasMore: Boolean = true,
+    val feedNote: String = "",
+    val feedTotalItems: Int = 0,
+    val feedDoneTargets: Int = 0,
+    val feedTotalTargets: Int = 0,
     val categoryCatalogReady: Boolean = false,
     val categorySourceCount: Int = 0,
-    val categoryTitles: List<TitleGroup> = emptyList(),
-    val categoryTotalItems: Int = 0,
-    val categoryDoneTargets: Int = 0,
-    val categoryTotalTargets: Int = 0,
-    val categoryLoading: Boolean = false,
-    val tabDoubanRows: List<DoubanRow> = emptyList(),
     val history: List<WatchRecord> = emptyList(),
     /** The title whose sources are being compared, and their async probes. */
     val selectedGroup: TitleGroup? = null,
@@ -95,11 +91,26 @@ data class UiState(
     val activeOffer: SourceOffer? = null
 )
 
-/** One Douban recommendation shelf: a label plus the titles under it. */
-data class DoubanRow(
-    val tag: String,
-    val label: String,
-    val subjects: List<DoubanSubject> = emptyList()
+/** Number of cards revealed per scroll segment. */
+private const val FEED_PAGE_SIZE = 24
+private const val DOUBAN_PAGE_SIZE = 20
+private const val MAX_SOURCE_PAGE = 3
+private const val MAX_DOUBAN_START = 100
+
+/**
+ * Everything needed to resume a (tab, genre) strip: the deduplicated raw
+ * results (so later source pages can re-aggregate with earlier ones), the
+ * already built cards, and the cursors for the two possible load-more paths.
+ */
+private data class FeedSnapshot(
+    val cards: List<FeedCard>,
+    val rawResults: List<SearchResult>,
+    val seenResultKeys: Set<String>,
+    val seenDoubanIds: Set<String>,
+    val nextSourcePage: Int,
+    val nextDoubanStart: Int,
+    val hasMore: Boolean,
+    val totalItems: Int
 )
 
 /**
@@ -177,16 +188,16 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var searchJob: Job? = null
-    private var categoryJob: Job? = null
-    private var tabDoubanJob: Job? = null
+    private var feedJob: Job? = null
     /** Category trees of every usable source, cached so tab switches are cheap. */
     private var allCatalogs: List<CategoryCatalog> = emptyList()
+    /** Built strips, keyed by "TAB|genre", so chip switches are instant. */
+    private val feedCache = mutableMapOf<String, FeedSnapshot>()
+    /** Only the newest strip is allowed to publish into [UiState]. */
+    private var activeFeedKey: String = ""
 
     /** pinyin-initial -> Chinese title, so a TV remote alone can reach a title. */
     private var titleIndex: Map<String, String> = emptyMap()
-
-    private fun needsCategory(tab: HomeTab): Boolean =
-        tab != HomeTab.RECOMMEND && tab != HomeTab.HISTORY
 
     init {
         viewModelScope.launch {
@@ -198,145 +209,483 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             // each source's own name -> id tree once, up front.
             allCatalogs = repo.allCategoryCatalogs(loaded, client)
             _state.value = _state.value.copy(
-                categorySource = allCatalogs.firstOrNull()?.source,
                 categorySourceCount = allCatalogs.size,
                 categoryCatalogReady = true
             )
-            // A tab may have been selected before the catalogs arrived.
+            // A category tab may have been selected before the catalogs arrived.
             val tab = _state.value.homeTab
-            if (needsCategory(tab)) loadCategoryTab(tab)
+            // Use the *currently selected* chip: the viewer may have switched
+            // genre while the category trees were still being probed.
+            val genre = tab.genres().firstOrNull { it.label == _state.value.genre }
+            if (tab != HomeTab.HISTORY && tab != HomeTab.RECOMMEND &&
+                genre != null && feedCache[feedKey(tab, genre.label)] == null
+            ) {
+                startFeed(tab, genre, reset = true)
+            }
         }
         viewModelScope.launch {
             historyStore.records.collect { records ->
                 _state.value = _state.value.copy(history = records)
             }
         }
-        loadDouban()
+        // The recommend strip does not depend on the category trees.
+        val first = HomeTab.RECOMMEND.genres().first()
+        startFeed(HomeTab.RECOMMEND, first, reset = true)
     }
 
-    // ---------- home tabs & categories ----------
+    // ---------- home tabs, genre chips & segmented grid ----------
+
+    private fun feedKey(tab: HomeTab, genre: String) = "${tab.name}|$genre"
+
+    private fun isActive(key: String): Boolean = activeFeedKey == key
 
     fun setHomeTab(tab: HomeTab) {
-        // Focus alone selects a tab now, so the same tab can be requested by a
-        // focus event and a touch tap within a few milliseconds. Bail out on a
-        // no-op change instead of dropping the freshly loaded shelves twice.
+        // Focus alone selects a tab, so a focus event and a touch tap can ask
+        // for the same tab within milliseconds. Bail out on a no-op change.
         if (_state.value.homeTab == tab) return
-        val needs = needsCategory(tab)
-        categoryJob?.cancel()
+        val genre = tab.genres().firstOrNull()
         _state.value = _state.value.copy(
             homeTab = tab,
-            categoryTitles = emptyList(),
-            categoryTotalItems = 0,
-            categoryDoneTargets = 0,
-            categoryTotalTargets = 0,
-            categoryLoading = needs,
-            tabDoubanRows = emptyList()
+            genre = genre?.label ?: "热门",
+            feed = emptyList(),
+            feedVisible = 0,
+            feedLoading = genre != null,
+            feedLoadingMore = false,
+            feedHasMore = true,
+            feedNote = "",
+            feedTotalItems = 0,
+            feedDoneTargets = 0,
+            feedTotalTargets = 0
         )
-        if (!needs) return
-        loadTabDouban(tab)
-        if (_state.value.categoryCatalogReady) loadCategoryTab(tab)
+        if (genre == null) {
+            feedJob?.cancel()
+            activeFeedKey = ""
+            return
+        }
+        selectGenreInternal(tab, genre)
+    }
+
+    fun setGenre(label: String) {
+        val tab = _state.value.homeTab
+        if (tab == HomeTab.HISTORY || _state.value.genre == label) return
+        val genre = tab.genres().firstOrNull { it.label == label } ?: return
+        _state.value = _state.value.copy(
+            genre = label,
+            feed = emptyList(),
+            feedVisible = 0,
+            feedLoading = true,
+            feedLoadingMore = false,
+            feedHasMore = true,
+            feedNote = "",
+            feedTotalItems = 0,
+            feedDoneTargets = 0,
+            feedTotalTargets = 0
+        )
+        selectGenreInternal(tab, genre)
+    }
+
+    private fun selectGenreInternal(tab: HomeTab, genre: HomeGenre) {
+        val key = feedKey(tab, genre.label)
+        val cached = feedCache[key]
+        if (cached != null) {
+            feedJob?.cancel()
+            activeFeedKey = key
+            publish(key, cached, minOf(FEED_PAGE_SIZE, cached.cards.size), false, false)
+            return
+        }
+        if (tab == HomeTab.RECOMMEND || _state.value.categoryCatalogReady) {
+            startFeed(tab, genre, reset = true)
+        } else {
+            // Category trees are still loading; init will start this strip.
+            feedJob?.cancel()
+            activeFeedKey = key
+        }
+    }
+
+    private fun startFeed(tab: HomeTab, genre: HomeGenre, reset: Boolean) {
+        feedJob?.cancel()
+        val key = feedKey(tab, genre.label)
+        activeFeedKey = key
+        if (reset) {
+            _state.value = _state.value.copy(
+                feedLoading = true,
+                feedLoadingMore = false,
+                feed = emptyList(),
+                feedVisible = 0,
+                feedHasMore = true,
+                feedNote = "正在加载「${genre.label}」…"
+            )
+        }
+        feedJob = viewModelScope.launch {
+            if (tab == HomeTab.RECOMMEND) {
+                loadDoubanPage(tab, genre, 0, append = false, key = key)
+            } else {
+                loadCategoryPage(tab, genre, 1, append = false, key = key)
+            }
+        }
     }
 
     /**
-     * Fan a tab out to *every* source that exposes a matching category and fold
-     * all returned titles into one aggregated shelf.
+     * Called by the grid when focus is close to the last visible card.
      *
-     * Each source answers into a channel, so the shelf fills in progressively
-     * instead of waiting for the slowest collector. Every refresh re-aggregates
-     * the accumulated list, which is what merges one film seen on ten APIs into
-     * a single card carrying ten offers.
+     * First it reveals another local segment (no network at all); only when
+     * every already-loaded card is on screen does it fetch the next page of
+     * source results / Douban recommendations.
      */
-    private fun loadCategoryTab(tab: HomeTab) {
-        categoryJob?.cancel()
-        // Category ids are local to a source: map the tab onto each source's own
-        // tree and keep at most two sub-categories per source to bound the
-        // number of requests (30 sources x 2 pages).
-        val targets = allCatalogs.flatMap { catalog ->
-            classify(catalog.classes)[tab].orEmpty().take(2).map { c ->
-                catalog.source to c.typeId
+    fun loadMore() {
+        val s = _state.value
+        if (s.feedLoading || s.feedLoadingMore || !s.feedHasMore ||
+            s.homeTab == HomeTab.HISTORY
+        ) return
+        val key = activeFeedKey
+        val snapshot = feedCache[key] ?: return
+        if (s.feedVisible < s.feed.size) {
+            _state.value = s.copy(
+                feedVisible = minOf(s.feedVisible + FEED_PAGE_SIZE, s.feed.size)
+            )
+            return
+        }
+        val tab = s.homeTab
+        val genre = tab.genres().firstOrNull { it.label == s.genre } ?: return
+        _state.value = s.copy(feedLoadingMore = true)
+        feedJob?.cancel()
+        feedJob = viewModelScope.launch {
+            if (tab == HomeTab.RECOMMEND) {
+                loadDoubanPage(tab, genre, snapshot.nextDoubanStart, append = true, key = key)
+            } else {
+                loadCategoryPage(tab, genre, snapshot.nextSourcePage, append = true, key = key)
             }
-        }.distinctBy { (source, typeId) -> "${source.url}|$typeId" }
+        }
+    }
 
-        _state.value = _state.value.copy(
-            categoryTitles = emptyList(),
-            categoryTotalItems = 0,
-            categoryDoneTargets = 0,
-            categoryTotalTargets = targets.size,
-            categoryLoading = targets.isNotEmpty()
+    /** Douban-backed strip used by 推荐 (and as a discovery fallback elsewhere). */
+    private suspend fun loadDoubanPage(
+        tab: HomeTab,
+        genre: HomeGenre,
+        pageStart: Int,
+        append: Boolean,
+        key: String
+    ) {
+        var subjects = withContext(Dispatchers.IO) {
+            douban.recommendations(genre.doubanTag, DOUBAN_PAGE_SIZE, tab.doubanType, pageStart)
+        }
+        if (subjects.isEmpty() && genre.doubanFallbackTag != genre.doubanTag) {
+            subjects = withContext(Dispatchers.IO) {
+                douban.recommendations(
+                    genre.doubanFallbackTag, DOUBAN_PAGE_SIZE, tab.doubanType, 0
+                )
+            }
+        }
+        if (!isActive(key)) return
+        val old = if (append) feedCache[key] else null
+        val seen = old?.seenDoubanIds.orEmpty().toMutableSet()
+        val fresh = subjects.filter { seen.add(it.id.ifBlank { it.title }) }
+        val cards = (old?.cards.orEmpty() + fresh.map { doubanCard(it) })
+            .distinctBy { it.key }
+        val nextStart = pageStart + DOUBAN_PAGE_SIZE
+        val hasMore = fresh.isNotEmpty() &&
+            subjects.size >= DOUBAN_PAGE_SIZE / 2 &&
+            nextStart <= MAX_DOUBAN_START &&
+            cards.size < 160
+        val snapshot = FeedSnapshot(
+            cards = cards,
+            rawResults = emptyList(),
+            seenResultKeys = emptySet(),
+            seenDoubanIds = seen.toSet(),
+            nextSourcePage = 1,
+            nextDoubanStart = nextStart,
+            hasMore = hasMore,
+            totalItems = cards.size
         )
-        if (targets.isEmpty()) return
+        val visible = if (append) {
+            minOf(cards.size, _state.value.feedVisible + FEED_PAGE_SIZE)
+        } else {
+            minOf(FEED_PAGE_SIZE, cards.size)
+        }
+        publish(key, snapshot, visible, false, false)
+    }
 
-        categoryJob = viewModelScope.launch {
-            val channel = Channel<List<SearchResult>>(Channel.UNLIMITED)
+    /** All-source fan-out for one tab + genre, one source page at a time. */
+    private suspend fun loadCategoryPage(
+        tab: HomeTab,
+        genre: HomeGenre,
+        page: Int,
+        append: Boolean,
+        key: String
+    ) {
+        val (targets, keywordFilter) = targetsFor(tab, genre)
+        if (!isActive(key)) return
+        _state.value = _state.value.copy(
+            feedTotalTargets = targets.size,
+            feedDoneTargets = 0,
+            feedNote = if (targets.isEmpty()) "没有匹配的子分类，正在读取豆瓣推荐…"
+            else "正在汇总 ${targets.size} 个采集源的「${genre.label}」片单…"
+        )
+
+        val old = if (append) feedCache[key] else null
+        val raw = old?.rawResults.orEmpty().toMutableList()
+        val seen = old?.seenResultKeys.orEmpty().toMutableSet()
+
+        val channel = Channel<List<SearchResult>>(Channel.UNLIMITED)
+        coroutineScope {
             val jobs = targets.map { (source, typeId) ->
                 async(Dispatchers.IO) {
                     val part = try {
-                        repo.categoryShelf(source, typeId, client)
+                        repo.categoryShelf(source, typeId, client, page)
                     } catch (e: Exception) {
                         emptyList()
                     }
                     channel.send(part)
                 }
             }
-            launch { jobs.awaitAll(); channel.close() }
+            launch {
+                try {
+                    jobs.awaitAll()
+                } catch (ignored: Exception) {
+                    // One collector's failure must never leave the channel open
+                    // and freeze the strip.
+                } finally {
+                    channel.close()
+                }
+            }
 
-            val collected = mutableListOf<SearchResult>()
-            // The same vod id can appear in two sub-categories of one source;
-            // count it once so the "N 源" badge reflects real distinct copies.
-            val seen = mutableSetOf<String>()
             var done = 0
             for (part in channel) {
-                if (_state.value.homeTab != tab) {
+                if (!isActive(key)) {
                     jobs.forEach { it.cancel() }
-                    return@launch
+                    return@coroutineScope
                 }
-                collected.addAll(
-                    part.filter { seen.add("${it.sourceUrl}|${it.item.vodId}") }
-                )
+                raw.addAll(part.filter { seen.add("${it.sourceUrl}|${it.item.vodId}") })
                 done++
-                val groups = aggregate(collected)
-                    .sortedWith(
-                        compareByDescending<TitleGroup> { it.offers.size }
-                            .thenByDescending { it.bestQuality.rank }
-                            .thenBy { if (it.fastestMs > 0L) it.fastestMs else Long.MAX_VALUE }
+                val snapshot = buildSnapshot(genre, raw, seen, old, keywordFilter, page)
+                // Progressive rendering matters for the first screen only; on a
+                // load-more the list stays put until the whole round is folded in.
+                // feedLoading stays true until the round completes so the infinite
+                // scroll trigger cannot cancel this job mid-flight.
+                if (!append) {
+                    publish(
+                        key = key,
+                        snapshot = snapshot,
+                        visible = minOf(FEED_PAGE_SIZE, snapshot.cards.size),
+                        loading = true,
+                        loadingMore = false,
+                        doneTargets = done
                     )
-                    .take(60)
-                _state.value = _state.value.copy(
-                    categoryTitles = groups,
-                    categoryTotalItems = collected.size,
-                    categoryDoneTargets = done,
-                    categoryLoading = false
-                )
-            }
-            if (_state.value.homeTab == tab) {
-                _state.value = _state.value.copy(
-                    categoryDoneTargets = targets.size,
-                    categoryLoading = false
-                )
+                }
             }
         }
+        if (!isActive(key)) return
+
+        var snapshot = buildSnapshot(genre, raw, seen, old, keywordFilter, page)
+        // When a collector has no such sub-category, Douban still gives the
+        // chip a meaningful grid (e.g. 美剧 / 英剧 / 韩剧).
+        if (snapshot.cards.size < 12 && !append) {
+            snapshot = supplementWithDouban(tab, genre, snapshot)
+        }
+        val visible = if (append) {
+            minOf(snapshot.cards.size, _state.value.feedVisible + FEED_PAGE_SIZE)
+        } else {
+            minOf(FEED_PAGE_SIZE, snapshot.cards.size)
+        }
+        publish(
+            key = key,
+            snapshot = snapshot,
+            visible = visible,
+            loading = false,
+            loadingMore = false,
+            doneTargets = targets.size
+        )
     }
 
-    /** Discovery fallback for category tabs when the collector is thin. */
-    private fun loadTabDouban(tab: HomeTab) {
-        tabDoubanJob?.cancel()
-        val tags = tab.doubanTags
-        if (tags.isEmpty()) {
-            _state.value = _state.value.copy(tabDoubanRows = emptyList())
-            return
+    /** Merge a page of raw results into one sorted, filtered card strip. */
+    private fun buildSnapshot(
+        genre: HomeGenre,
+        raw: List<SearchResult>,
+        seen: Set<String>,
+        old: FeedSnapshot?,
+        keywordFilter: Boolean,
+        page: Int
+    ): FeedSnapshot {
+        var groups = aggregate(raw).filter { it.playableCount > 0 }
+        if (keywordFilter && genre.keywords.isNotEmpty()) {
+            groups = groups.filter { matchesGenre(it, genre.keywords) }
         }
-        tabDoubanJob = viewModelScope.launch {
-            val rows = coroutineScope {
-                tags.map { tag ->
-                    async(Dispatchers.IO) {
-                        tag to douban.recommendations(tag, 16, tab.doubanType)
-                    }
-                }.awaitAll()
-            }.mapNotNull { (tag, subjects) ->
-                if (subjects.isEmpty()) null else DoubanRow(tag, tag, subjects)
+        groups = sortGroups(groups, genre.sort)
+
+        val cards = buildList {
+            addAll(groups.map { groupCard(it) })
+            // Keep discovery cards fetched on an earlier round.
+            addAll(old?.cards.orEmpty().filter { it.subject != null })
+        }.distinctBy { it.key }
+
+        return FeedSnapshot(
+            cards = cards,
+            rawResults = raw.toList(),
+            seenResultKeys = seen,
+            seenDoubanIds = old?.seenDoubanIds.orEmpty(),
+            nextSourcePage = page + 1,
+            nextDoubanStart = old?.nextDoubanStart ?: 0,
+            hasMore = page < MAX_SOURCE_PAGE && raw.isNotEmpty(),
+            totalItems = raw.size
+        )
+    }
+
+    /** Fill a thin strip with Douban discoveries so a genre is never empty. */
+    private suspend fun supplementWithDouban(
+        tab: HomeTab,
+        genre: HomeGenre,
+        snapshot: FeedSnapshot
+    ): FeedSnapshot {
+        var subjects = withContext(Dispatchers.IO) {
+            douban.recommendations(genre.doubanTag, DOUBAN_PAGE_SIZE, tab.doubanType, 0)
+        }
+        if (subjects.isEmpty()) {
+            subjects = withContext(Dispatchers.IO) {
+                douban.recommendations(
+                    genre.doubanFallbackTag, DOUBAN_PAGE_SIZE, tab.doubanType, 0
+                )
             }
-            _state.value = _state.value.copy(tabDoubanRows = rows)
         }
+        val seen = snapshot.seenDoubanIds.toMutableSet()
+        val existingTitles = snapshot.cards.map { it.title }.toHashSet()
+        val fresh = subjects.filter {
+            existingTitles.add(it.title) && seen.add(it.id.ifBlank { it.title })
+        }
+        if (fresh.isEmpty()) return snapshot
+        return snapshot.copy(
+            cards = (snapshot.cards + fresh.map { doubanCard(it) }).distinctBy { it.key },
+            seenDoubanIds = seen.toSet(),
+            nextDoubanStart = DOUBAN_PAGE_SIZE
+        )
+    }
+
+    /**
+     * Resolve a genre into (source, type_id) pairs.
+     *
+     * Sorting-only genres use the tab's usual sub-categories; named genres
+     * look for a node whose name matches the aliases in *each* source's own
+     * tree. If no collector exposes that node, the caller filters the merged
+     * titles locally with [HomeGenre.keywords] instead.
+     */
+    private fun targetsFor(
+        tab: HomeTab,
+        genre: HomeGenre
+    ): Pair<List<Pair<SourceConfig, Int>>, Boolean> {
+        val defaultTargets = allCatalogs.flatMap { catalog ->
+            classify(catalog.classes)[tab].orEmpty().take(2).map { c ->
+                catalog.source to c.typeId
+            }
+        }.distinctBy { (source, typeId) -> "${source.url}|$typeId" }
+
+        if (genre.isSortOnly()) return defaultTargets to false
+        val matched = allCatalogs.flatMap { catalog ->
+            catalog.classes
+                .filter { c -> genre.categoryAliases.any { c.typeName.contains(it) } }
+                .take(2)
+                .map { c -> catalog.source to c.typeId }
+        }.distinctBy { (source, typeId) -> "${source.url}|$typeId" }
+
+        return if (matched.isNotEmpty()) matched to false else defaultTargets to true
+    }
+
+    private fun matchesGenre(group: TitleGroup, keywords: List<String>): Boolean {
+        val haystack = buildString {
+            append(group.typeName).append(' ').append(group.area).append(' ')
+            append(group.title).append(' ')
+            group.offers.take(2).forEach { offer ->
+                append(offer.item.typeName).append(' ')
+                append(offer.item.vodArea).append(' ')
+                append(offer.item.vodRemarks).append(' ')
+                append(offer.item.vodContent.take(60)).append(' ')
+            }
+        }.lowercase()
+        return keywords.any { haystack.contains(it.lowercase()) }
+    }
+
+    private fun yearNumber(year: String): Int =
+        year.filter { it.isDigit() }.take(4).toIntOrNull() ?: 0
+
+    private fun sortGroups(groups: List<TitleGroup>, sort: FeedSort): List<TitleGroup> =
+        when (sort) {
+            FeedSort.NEW -> groups.sortedWith(
+                compareByDescending<TitleGroup> { yearNumber(it.year) }
+                    .thenByDescending { it.playableCount }
+            )
+            FeedSort.CLASSIC -> groups.sortedWith(
+                compareBy<TitleGroup> {
+                    val y = yearNumber(it.year)
+                    if (y in 1900..2026) y else 9999
+                }.thenByDescending { it.playableCount }
+            )
+            FeedSort.HOT -> groups.sortedWith(
+                compareByDescending<TitleGroup> { it.playableCount }
+                    .thenByDescending { it.bestQuality.rank }
+                    .thenBy { if (it.fastestMs > 0L) it.fastestMs else Long.MAX_VALUE }
+            )
+        }
+
+    private fun groupCard(group: TitleGroup): FeedCard = FeedCard(
+        key = "g|${group.key}",
+        title = group.title,
+        poster = group.poster,
+        badges = listOf(
+            FeedBadge(group.year.ifBlank { "年份未知" }, FeedBadgeKind.NEUTRAL),
+            FeedBadge("${group.playableCount} 源", FeedBadgeKind.ACCENT),
+            FeedBadge(group.bestQuality.short, FeedBadgeKind.QUALITY),
+            FeedBadge(shortLatency(group.fastestMs), FeedBadgeKind.LATENCY)
+        ),
+        group = group
+    )
+
+    private fun doubanCard(subject: DoubanSubject): FeedCard = FeedCard(
+        key = "d|${subject.id.ifBlank { subject.title }}",
+        title = subject.title,
+        poster = subject.cover,
+        cornerBadge = subject.rate.takeIf { it.isNotBlank() },
+        badges = listOf(
+            FeedBadge(subject.year.ifBlank { "新片" }, FeedBadgeKind.NEUTRAL),
+            FeedBadge("豆瓣推荐", FeedBadgeKind.ACCENT),
+            FeedBadge("全网搜源", FeedBadgeKind.LATENCY)
+        ),
+        subject = subject
+    )
+
+    private fun shortLatency(ms: Long): String = when {
+        ms <= 0L -> "延时未知"
+        ms < 1000L -> "$ms ms"
+        else -> "%.1f s".format(ms / 1000.0)
+    }
+
+    /** Commit one strip into the UI state and keep it cached for chip switches. */
+    private fun publish(
+        key: String,
+        snapshot: FeedSnapshot,
+        visible: Int,
+        loading: Boolean,
+        loadingMore: Boolean,
+        doneTargets: Int = 0
+    ) {
+        if (!isActive(key)) return
+        feedCache[key] = snapshot
+        val tab = _state.value.homeTab
+        val note = if (tab == HomeTab.RECOMMEND) {
+            "豆瓣「${_state.value.genre}」· 已加载 ${snapshot.cards.size} 部 · " +
+                "点击后自动在全部采集源里搜索播放地址"
+        } else {
+            val aggregated = snapshot.cards.count { it.group != null }
+            "全源聚合「${_state.value.genre}」· ${snapshot.totalItems} 条资源合并为 " +
+                "$aggregated 部（同名已合并）· 多源选源 / 单源直达播放"
+        }
+        _state.value = _state.value.copy(
+            feed = snapshot.cards,
+            feedVisible = visible,
+            feedLoading = loading,
+            feedLoadingMore = loadingMore,
+            feedHasMore = snapshot.hasMore,
+            feedTotalItems = snapshot.totalItems,
+            feedNote = note,
+            feedDoneTargets = doneTargets
+        )
     }
 
     // ---------- watch history ----------
@@ -382,28 +731,6 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------- Douban discovery ----------
-
-    /**
-     * Load the recommendation shelves shown on the home screen. Rows are loaded
-     * one at a time and appended as they arrive so the first shelf shows up
-     * without waiting for the slowest tag.
-     */
-    fun loadDouban(tabs: List<Pair<String, String>> = DoubanClient.RECOMMEND_TABS) {
-        if (_state.value.doubanLoading) return
-        _state.value = _state.value.copy(doubanLoading = true)
-        viewModelScope.launch {
-            // Load the shelves concurrently but keep the configured order, so the
-            // layout stays stable no matter which tag answers first.
-            val loaded = tabs.map { (label, tag) ->
-                async(Dispatchers.IO) { label to douban.recommendations(tag) }
-            }.awaitAll()
-
-            val rows = loaded.mapNotNull { (label, subjects) ->
-                if (subjects.isEmpty()) null else DoubanRow(label, label, subjects)
-            }
-            _state.value = _state.value.copy(doubanRows = rows, doubanLoading = false)
-        }
-    }
 
     /** Search a Douban title across the bundled sources and jump to the results. */
     fun searchDoubanTitle(subject: DoubanSubject) {
@@ -550,11 +877,6 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- aggregated sources ----------
 
-    /**
-     * Open the source picker for one title and, in parallel, probe each offer.
-     * The picker shows the coarse (search) latency immediately and fills in the
-     * line / episode count and stream first-byte time as the probes land.
-     */
     /**
      * One card, two destinations: several playable sources open the comparison
      * page, while a single-source title skips the extra step and goes straight

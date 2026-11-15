@@ -6,38 +6,30 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusProperties
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.Explore
@@ -49,8 +41,31 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Theaters
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.libretv.tv.data.AdFilterSettings
 import com.libretv.tv.data.CmsClient
@@ -62,12 +77,10 @@ import com.libretv.tv.data.SourceRepository
 import com.libretv.tv.data.VodItem
 import com.libretv.tv.data.WatchRecord
 import com.libretv.tv.ui.CategoryHint
-import com.libretv.tv.ui.CategoryShelf
 import com.libretv.tv.ui.DetailScreen
-import com.libretv.tv.ui.DoubanLoadingHint
-import com.libretv.tv.ui.DoubanShelf
 import com.libretv.tv.ui.FocusableTile
 import com.libretv.tv.ui.HistoryPage
+import com.libretv.tv.ui.HomeGenre
 import com.libretv.tv.ui.HomeTab
 import com.libretv.tv.ui.NavItem
 import com.libretv.tv.ui.PlayerScreen
@@ -80,7 +93,8 @@ import com.libretv.tv.ui.TvBackgroundBrush
 import com.libretv.tv.ui.TvColors
 import com.libretv.tv.ui.TvViewModel
 import com.libretv.tv.ui.UiState
-import com.libretv.tv.ui.tvFocusable
+import com.libretv.tv.ui.UnifiedPosterCard
+import com.libretv.tv.ui.genres
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -192,6 +206,8 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             onSearch = { vm.navigate(Screen.SEARCH) },
             onSources = { vm.navigate(Screen.SOURCES) },
             onSelectTab = { vm.setHomeTab(it) },
+            onSelectGenre = { vm.setGenre(it) },
+            onLoadMore = { vm.loadMore() },
             onPickDouban = { vm.searchDoubanTitle(it) },
             onPickGroup = { vm.openGroupOrDetail(it, Screen.HOME) },
             onResume = resumeRecord,
@@ -352,6 +368,8 @@ private fun HomeLayout(
     onSearch: () -> Unit,
     onSources: () -> Unit,
     onSelectTab: (HomeTab) -> Unit,
+    onSelectGenre: (String) -> Unit,
+    onLoadMore: () -> Unit,
     onPickDouban: (DoubanSubject) -> Unit,
     onPickGroup: (TitleGroup) -> Unit,
     onResume: (WatchRecord) -> Unit,
@@ -359,9 +377,9 @@ private fun HomeLayout(
     onClearHistory: () -> Unit
 ) {
     val tabs = remember { HomeTab.entries.toList() }
-    // The whole navigation lives on the left rail now: search, then every home
-    // tab in display order, then source management. One requester per entry,
-    // with wrap-around up/down, keeps the D-pad cycling inside the rail.
+    // The whole navigation lives on the left rail: search, then every home tab
+    // in display order, then source management. One requester per entry, with
+    // wrap-around up/down, keeps the D-pad cycling inside the rail.
     val railEntries = remember(state.history.size, state.sources.size) {
         buildList {
             add(RailEntry("搜索", icon = Icons.Filled.Search, action = 0))
@@ -383,14 +401,9 @@ private fun HomeLayout(
     val railRequesters = remember { List(railEntries.size) { FocusRequester() } }
     val railBringers = remember { List(railEntries.size) { BringIntoViewRequester() } }
     val railScroll = rememberScrollState()
-    val scrollState = rememberScrollState()
 
     LaunchedEffect(Unit) {
         railRequesters[0].requestFocus()
-    }
-    // A category switch should always start at the top of its own shelves.
-    LaunchedEffect(state.homeTab) {
-        scrollState.scrollTo(0)
     }
 
     Row(
@@ -405,15 +418,13 @@ private fun HomeLayout(
             modifier = Modifier
                 .width(178.dp)
                 .verticalScroll(railScroll),
-            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
                 "LibreTV",
                 color = TvColors.OnSurface,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Medium,
-                // Lines up with the icon chip inside NavItem (14.dp inner inset
-                // on top of the 24.dp rail inset).
                 modifier = Modifier.padding(start = 14.dp, bottom = 12.dp)
             )
 
@@ -464,146 +475,257 @@ private fun HomeLayout(
                     modifier = Modifier.weight(1f)
                 )
             } else {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxSize()
-                        .verticalScroll(scrollState)
-                ) {
-                    if (state.homeTab == HomeTab.RECOMMEND) {
-                        HeroBlock(sourceCount = state.sources.size, onSearch = onSearch)
-                        Spacer(Modifier.height(12.dp))
-
-                        // Watch history is deliberately confined to the 历史 tab.
-                        if (state.doubanLoading && state.doubanRows.isEmpty()) {
-                            DoubanLoadingHint()
-                        }
-                        state.doubanRows.forEach { row ->
-                            DoubanShelf(
-                                label = row.label,
-                                subjects = row.subjects,
-                                onPick = onPickDouban
-                            )
-                            Spacer(Modifier.height(18.dp))
-                        }
-                        if (!state.doubanLoading && state.doubanRows.isEmpty()) {
-                            CategoryHint("豆瓣推荐加载失败，可使用遥控器搜索")
-                        }
-                    } else {
-                        CategoryTabContent(
-                            state = state,
-                            onPickGroup = onPickGroup,
-                            onPickDouban = onPickDouban
-                        )
-                    }
-                }
+                HomeFeedPage(
+                    state = state,
+                    onSelectGenre = onSelectGenre,
+                    onPickGroup = onPickGroup,
+                    onPickDouban = onPickDouban,
+                    onLoadMore = onLoadMore
+                )
             }
         }
     }
 }
 
+/**
+ * Content page shared by every tab but 历史: a genre strip on top and one
+ * vertically scrolling grid below it. The grid only reveals one segment at a
+ * time and asks for the next one when focus approaches the last visible card.
+ */
 @Composable
-private fun HeroBlock(sourceCount: Int, onSearch: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 40.dp, end = 40.dp, bottom = 6.dp)
-    ) {
-        Column(Modifier.align(Alignment.CenterStart)) {
-            Text(
-                "看点什么？",
-                color = TvColors.OnSurface,
-                fontSize = 30.sp,
-                fontWeight = FontWeight.Medium
+private fun HomeFeedPage(
+    state: UiState,
+    onSelectGenre: (String) -> Unit,
+    onPickGroup: (TitleGroup) -> Unit,
+    onPickDouban: (DoubanSubject) -> Unit,
+    onLoadMore: () -> Unit
+) {
+    val genres = remember(state.homeTab) { state.homeTab.genres() }
+    val chipRequesters = remember(genres.size) { List(genres.size) { FocusRequester() } }
+    val gridState = rememberLazyGridState()
+
+    // A tab / genre switch always starts at the top of its own grid.
+    LaunchedEffect(state.homeTab, state.genre) {
+        gridState.scrollToItem(0)
+    }
+
+    // Infinite scroll: read the newest state from inside a single long-lived
+    // flow instead of restarting the collector on every recomposition.
+    val latestState by rememberUpdatedState(state)
+    val latestLoadMore by rememberUpdatedState(onLoadMore)
+    LaunchedEffect(gridState) {
+        snapshotFlow {
+            gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        }.collect { last ->
+            val s = latestState
+            if (s.feedHasMore && !s.feedLoading && !s.feedLoadingMore &&
+                s.feedVisible > 0 && last >= s.feedVisible - 6
+            ) {
+                latestLoadMore()
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        FeedHeader(state)
+        GenreStrip(
+            genres = genres,
+            current = state.genre,
+            requesters = chipRequesters,
+            onSelect = onSelectGenre
+        )
+
+        if (state.feedLoading && state.feed.isEmpty()) {
+            FeedCenteredLoading(
+                text = state.feedNote.ifBlank { "正在加载「${state.genre}」…" } +
+                    if (state.feedTotalTargets > 0) {
+                        " (${state.feedDoneTargets}/${state.feedTotalTargets})"
+                    } else ""
             )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "内置 $sourceCount 个采集接口 · 按电影 / 剧集 / 综艺分类浏览，也能遥控器搜索",
-                color = TvColors.OnSurfaceMuted,
-                fontSize = 13.sp
-            )
-            Spacer(Modifier.height(16.dp))
-            FocusableTile(onClick = onSearch) { focused ->
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (focused) TvColors.Primary else TvColors.SurfaceHigh)
-                        .tvFocusable(focused, RoundedCornerShape(10.dp))
-                        .padding(horizontal = 30.dp, vertical = 13.dp)
-                ) {
-                    Text(
-                        "开始搜索",
-                        color = if (focused) Color(0xFF14181D) else TvColors.OnSurface,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
+        } else if (state.feed.isEmpty() && !state.feedHasMore && !state.feedLoading) {
+            CategoryHint("该类型暂时没有片单，可切换上方类型或使用遥控器搜索")
+        }
+
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(150.dp),
+            state = gridState,
+            contentPadding = PaddingValues(
+                start = 40.dp, end = 40.dp, top = 8.dp, bottom = 40.dp
+            ),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            gridItems(state.feed.take(state.feedVisible), key = { it.key }) { card ->
+                FocusableTile(
+                    onClick = {
+                        when {
+                            card.group != null -> onPickGroup(card.group)
+                            card.subject != null -> onPickDouban(card.subject)
+                        }
+                    }
+                ) { focused ->
+                    UnifiedPosterCard(
+                        card = card,
+                        focused = focused,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
+            if (state.feedLoadingMore || (state.feedLoading && state.feed.isNotEmpty())) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    FeedLoadingFooter("正在加载下一批…")
+                }
+            } else if (!state.feedHasMore && state.feed.isNotEmpty()) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    FeedLoadingFooter("已经到底啦 · 共 ${state.feed.size} 部", spinning = false)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun CategoryTabContent(
-    state: UiState,
-    onPickGroup: (TitleGroup) -> Unit,
-    onPickDouban: (DoubanSubject) -> Unit
-) {
-    val sourceCount = state.categorySourceCount.takeIf { it > 0 } ?: state.sources.size
+private fun FeedHeader(state: UiState) {
     Row(
-        modifier = Modifier.padding(start = 40.dp, end = 40.dp, top = 10.dp, bottom = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 40.dp, end = 40.dp, top = 8.dp, bottom = 12.dp)
     ) {
-        Text(
-            "${state.homeTab.label} · 全源聚合",
-            color = TvColors.OnSurface,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Medium
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                "${state.homeTab.label} · ${state.genre}",
+                color = TvColors.OnSurface,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                state.feedNote.ifBlank { "选择上方类型，网格向下浏览" },
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
         Spacer(Modifier.width(14.dp))
-        Text(
-            if (state.categoryLoading && state.categoryTitles.isEmpty()) {
-                "正在汇总 $sourceCount 个采集源…"
-            } else {
-                "已整合 $sourceCount 个源 · ${state.categoryTotalItems} 条资源 → " +
-                    "${state.categoryTitles.size} 部影片（同名已合并）"
-            },
-            color = TvColors.OnSurfaceMuted,
-            fontSize = 12.sp
-        )
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(TvColors.Surface)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Text(
+                "${state.feedVisible}/${state.feed.size} 部",
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 12.sp
+            )
+        }
     }
+}
 
-    // Watch history lives only on the 历史 tab now.
-    if (state.categoryLoading && state.categoryTitles.isEmpty()) {
-        CategoryHint(
-            "正在从所有源拉取${state.homeTab.label}片单并合并同名资源… " +
-                "(${state.categoryDoneTargets}/${state.categoryTotalTargets})"
-        )
-    }
-
-    if (state.categoryTitles.isNotEmpty()) {
-        CategoryShelf(
-            label = "${state.homeTab.label} · ${state.categoryTitles.size} 部 · " +
-                "单源直达播放页 / 多源进入选源",
-            groups = state.categoryTitles,
-            onPick = onPickGroup
-        )
-        Spacer(Modifier.height(18.dp))
-    }
-
-    state.tabDoubanRows.forEach { row ->
-        DoubanShelf(
-            label = "${state.homeTab.label} · ${row.label}推荐",
-            subjects = row.subjects,
-            onPick = onPickDouban
-        )
-        Spacer(Modifier.height(18.dp))
-    }
-
-    if (!state.categoryLoading &&
-        state.categoryTitles.isEmpty() &&
-        state.tabDoubanRows.isEmpty()
+@Composable
+private fun GenreStrip(
+    genres: List<HomeGenre>,
+    current: String,
+    requesters: List<FocusRequester>,
+    onSelect: (String) -> Unit
+) {
+    LazyRow(
+        contentPadding = PaddingValues(start = 40.dp, end = 40.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxWidth()
     ) {
-        CategoryHint("该分类暂时没有片单，可切换到「推荐」或使用遥控器搜索")
+        itemsIndexed(genres, key = { _, g -> g.label }) { index, genre ->
+            FocusableTile(
+                onClick = { onSelect(genre.label) },
+                scaleWhenFocused = 1.06f,
+                modifier = Modifier.focusRequester(requesters[index])
+            ) { focused ->
+                if (focused) {
+                    // Genre chips select on focus, just like the left rail tabs.
+                    LaunchedEffect(genre.label) { onSelect(genre.label) }
+                }
+                GenreChip(
+                    label = genre.label,
+                    focused = focused,
+                    selected = genre.label == current
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GenreChip(label: String, focused: Boolean, selected: Boolean) {
+    val shape = RoundedCornerShape(20.dp)
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(
+                when {
+                    focused -> TvColors.SurfaceHigh
+                    selected -> TvColors.PrimaryDim
+                    else -> TvColors.Surface
+                }
+            )
+            .border(
+                width = if (focused) 2.dp else 1.dp,
+                color = if (focused) TvColors.FocusRing else Color(0x22FFFFFF),
+                shape = shape
+            )
+            .padding(horizontal = 18.dp, vertical = 9.dp)
+    ) {
+        Text(
+            label,
+            color = when {
+                focused || selected -> Color.White
+                else -> TvColors.OnSurfaceMuted
+            },
+            fontSize = 13.sp,
+            fontWeight = if (focused || selected) FontWeight.Medium else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun FeedCenteredLoading(text: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 40.dp, top = 22.dp, bottom = 10.dp)
+    ) {
+        CircularProgressIndicator(
+            color = TvColors.Primary,
+            modifier = Modifier.size(16.dp),
+            strokeWidth = 2.dp
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(text, color = TvColors.OnSurfaceMuted, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun FeedLoadingFooter(text: String, spinning: Boolean = true) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 16.dp)
+    ) {
+        if (spinning) {
+            CircularProgressIndicator(
+                color = TvColors.Primary,
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 2.dp
+            )
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(text, color = TvColors.OnSurfaceMuted, fontSize = 12.sp)
     }
 }
