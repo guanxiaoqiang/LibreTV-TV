@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -60,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -209,6 +211,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             onSearch = { vm.navigate(Screen.SEARCH) },
             onSources = { vm.navigate(Screen.SOURCES) },
             onSelectTab = { vm.setHomeTab(it) },
+            onRailFocus = { vm.setRailFocus(it) },
             onSelectGenre = { vm.setGenre(it) },
             onLoadMore = { vm.loadMore() },
             onPickDouban = { vm.searchDoubanTitle(it) },
@@ -221,11 +224,16 @@ fun TvApp(vm: TvViewModel = viewModel()) {
         Screen.SEARCH -> SearchScreen(
             query = state.query,
             candidates = vm.candidateTitles(),
+            searchHistory = state.searchHistory,
+            onQueryChange = { vm.setQuery(it) },
             onInput = { vm.inputLetter(it) },
             onBackspace = { vm.t9Backspace() },
             onSubmit = { vm.submitSearch() },
             onClear = { vm.t9Clear() },
-            onPickCandidate = { vm.pickCandidate(it) }
+            onPickCandidate = { vm.pickCandidate(it) },
+            onPickHistory = { vm.submitSearch(it) },
+            onDeleteHistory = { vm.deleteSearchHistory(it) },
+            onClearHistory = { vm.clearSearchHistory() }
         )
 
         Screen.RESULT -> ResultScreen(
@@ -374,6 +382,7 @@ private fun HomeLayout(
     onSearch: () -> Unit,
     onSources: () -> Unit,
     onSelectTab: (HomeTab) -> Unit,
+    onRailFocus: (Int) -> Unit,
     onSelectGenre: (String) -> Unit,
     onLoadMore: () -> Unit,
     onPickDouban: (DoubanSubject) -> Unit,
@@ -401,8 +410,14 @@ private fun HomeLayout(
     val railBringers = remember { List(railEntries.size) { BringIntoViewRequester() } }
     val railScroll = rememberScrollState()
 
+    // The rail slot the viewer left last. Both LEFT from the content grid and a
+    // return from another screen use this exact requester, so focus never jumps
+    // to whichever nav item happens to be geometrically closest.
+    val railTargetIndex = state.railFocusIndex.coerceIn(0, railEntries.lastIndex)
+    val railTarget = railRequesters[railTargetIndex]
+
     LaunchedEffect(Unit) {
-        railRequesters[0].requestFocus()
+        railRequesters[railTargetIndex].requestFocus()
     }
 
     Row(
@@ -442,6 +457,7 @@ private fun HomeLayout(
                     scaleWhenFocused = 1.05f,
                     modifier = Modifier
                         .focusRequester(railRequesters[index])
+                        .onFocusChanged { if (it.isFocused) onRailFocus(index) }
                         .focusProperties {
                             up = railRequesters[(index - 1 + railEntries.size) % railEntries.size]
                             down = railRequesters[(index + 1) % railEntries.size]
@@ -478,11 +494,13 @@ private fun HomeLayout(
                     onResume = onResume,
                     onDelete = onDeleteHistory,
                     onClear = onClearHistory,
+                    leftTarget = railTarget,
                     modifier = Modifier.weight(1f)
                 )
             } else {
                 HomeFeedPage(
                     state = state,
+                    leftTarget = railTarget,
                     onSelectGenre = onSelectGenre,
                     onPickGroup = onPickGroup,
                     onPickDouban = onPickDouban,
@@ -501,6 +519,7 @@ private fun HomeLayout(
 @Composable
 private fun HomeFeedPage(
     state: UiState,
+    leftTarget: FocusRequester?,
     onSelectGenre: (String) -> Unit,
     onPickGroup: (TitleGroup) -> Unit,
     onPickDouban: (DoubanSubject) -> Unit,
@@ -524,6 +543,18 @@ private fun HomeFeedPage(
             val visible = gridState.layoutInfo.visibleItemsInfo
             val topY = visible.minOfOrNull { it.offset.y } ?: return@derivedStateOf emptySet()
             visible.filter { it.offset.y == topY }.map { it.index }.toSet()
+        }
+    }
+
+    // Only the left-most column is wired back to the rail; every other card
+    // keeps normal grid D-pad navigation (LEFT moves one column inward).
+    // Reading the live layout means the binding follows the scroll position
+    // instead of pointing at a recycled, detached item.
+    val firstColumnIndices: Set<Int> by remember(gridState) {
+        derivedStateOf<Set<Int>> {
+            val visible = gridState.layoutInfo.visibleItemsInfo
+            val leftX = visible.minOfOrNull { it.offset.x } ?: return@derivedStateOf emptySet()
+            visible.filter { it.offset.x == leftX }.map { it.index }.toSet()
         }
     }
 
@@ -555,6 +586,7 @@ private fun HomeFeedPage(
             genres = genres,
             current = state.genre,
             requesters = chipRequesters,
+            leftTarget = leftTarget,
             onSelect = onSelectGenre,
             onFocused = { lastChipIndex = it }
         )
@@ -592,10 +624,10 @@ private fun HomeFeedPage(
                 // already picks the nearest card below. UP is explicit so the
                 // viewer returns to the chip they originally left.
                 val upTarget = upChip
-                val upModifier = if (upTarget != null && index in firstRowIndices) {
-                    Modifier.focusProperties { up = upTarget }
-                } else {
-                    Modifier
+                val railTarget = leftTarget
+                val navigationModifier = Modifier.focusProperties {
+                    if (upTarget != null && index in firstRowIndices) up = upTarget
+                    if (railTarget != null && index in firstColumnIndices) left = railTarget
                 }
                 FocusableTile(
                     onClick = {
@@ -604,7 +636,7 @@ private fun HomeFeedPage(
                             card.subject != null -> onPickDouban(card.subject)
                         }
                     },
-                    modifier = upModifier
+                    modifier = navigationModifier
                 ) { focused ->
                     UnifiedPosterCard(
                         card = card,
@@ -671,10 +703,20 @@ private fun GenreStrip(
     genres: List<HomeGenre>,
     current: String,
     requesters: List<FocusRequester>,
+    leftTarget: FocusRequester?,
     onSelect: (String) -> Unit,
     onFocused: (Int) -> Unit
 ) {
+    val stripState = rememberLazyListState()
+    // Bind only the left-most *visible* chip: after a horizontal scroll the
+    // first chip is recycled and its requester is no longer attached.
+    val leadingChipIndex by remember(stripState) {
+        derivedStateOf {
+            stripState.layoutInfo.visibleItemsInfo.minOfOrNull { it.index } ?: 0
+        }
+    }
     LazyRow(
+        state = stripState,
         // Vertical padding keeps focused chips (1.06x scale) inside the row and
         // adds a gap between the chip strip and the first poster row.
         contentPadding = PaddingValues(
@@ -684,10 +726,15 @@ private fun GenreStrip(
         modifier = Modifier.fillMaxWidth()
     ) {
         itemsIndexed(genres, key = { _, g -> g.label }) { index, genre ->
+            val rail = leftTarget
             FocusableTile(
                 onClick = { onSelect(genre.label) },
                 scaleWhenFocused = 1.06f,
-                modifier = Modifier.focusRequester(requesters[index])
+                modifier = Modifier
+                    .focusRequester(requesters[index])
+                    .focusProperties {
+                        if (rail != null && index == leadingChipIndex) left = rail
+                    }
             ) { focused ->
                 if (focused) {
                     // Genre chips select on focus, just like the left rail tabs.

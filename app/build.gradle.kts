@@ -12,8 +12,8 @@ android {
         applicationId = "com.libretv.tv"
         minSdk = 23
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.7.0-tv"
+        versionCode = 10
+        versionName = "1.8.0-tv"
     }
 
     buildTypes {

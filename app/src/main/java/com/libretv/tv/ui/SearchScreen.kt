@@ -2,9 +2,12 @@ package com.libretv.tv.ui
 
 import android.view.KeyEvent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,9 +15,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,11 +36,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,30 +57,31 @@ private val keyboardRows = listOf(
     listOf("Z", "X", "C", "V", "B", "N", "M")
 )
 
-/** Action keys that sit under the letter rows. */
-private enum class ActionKey { BACKSPACE, CLEAR, SEARCH }
-
 /**
- * Full keyboard search.
+ * Search with three complementary input paths:
  *
- * The previous T9 keypad was faster for a single known title but it could not
- * type a name that is not already in the bundled pinyin index. A full
- * QWERTY board covers every case, and on a remote it stays usable because:
+ *  - the full QWERTY board (pinyin initials -> Chinese titles) for a remote,
+ *  - a real focusable text field that pulls up the IME for Chinese / free text,
+ *  - persisted recent keywords, one tap to search again.
  *
- *  - the focus chain is explicit, so the D-pad never guesses,
- *  - the letters are pinyin initials, so "ldqd" resolves to 流浪地球,
- *  - the physical number keys still work and jump straight to a letter,
- *  - every key is also a tap target for touch users.
+ * While the text field holds focus every physical key is left to the IME; the
+ * root key handler below would otherwise also fold letters into the pinyin
+ * buffer and double-apply input.
  */
 @Composable
 fun SearchScreen(
     query: String,
     candidates: List<String>,
+    searchHistory: List<String>,
+    onQueryChange: (String) -> Unit,
     onInput: (String) -> Unit,
     onBackspace: () -> Unit,
     onSubmit: () -> Unit,
     onClear: () -> Unit,
-    onPickCandidate: (String) -> Unit
+    onPickCandidate: (String) -> Unit,
+    onPickHistory: (String) -> Unit,
+    onDeleteHistory: (String) -> Unit,
+    onClearHistory: () -> Unit
 ) {
     // One requester per letter key plus one per action key.
     val letterCount = keyboardRows.sumOf { it.size }
@@ -76,8 +89,15 @@ fun SearchScreen(
     val backspaceRequester = requesters[letterCount]
     val clearRequester = requesters[letterCount + 1]
     val searchRequester = requesters[letterCount + 2]
+    val inputRequester = remember { FocusRequester() }
 
-    var flatIndex by remember { mutableStateOf(0) }
+    var inputFocused by remember { mutableStateOf(false) }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(inputFocused) {
+        // A focused BasicTextField normally asks for the IME itself; show()
+        // covers TV launchers / remote-only devices that need the extra nudge.
+        if (inputFocused) keyboard?.show()
+    }
 
     // Remember where each key sits so the chain can be built.
     val keyPositions = remember {
@@ -91,7 +111,7 @@ fun SearchScreen(
     // the three rows have different widths.
     val columnOf = remember {
         val map = mutableMapOf<String, Int>()
-        keyboardRows.forEachIndexed { rowIndex, row ->
+        keyboardRows.forEach { row ->
             row.forEachIndexed { colIndex, ch -> map[ch] = colIndex }
         }
         map
@@ -114,6 +134,7 @@ fun SearchScreen(
             .fillMaxSize()
             .padding(28.dp)
             .onKeyEvent { event ->
+                if (inputFocused) return@onKeyEvent false
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (event.nativeKeyEvent.keyCode) {
                     KeyEvent.KEYCODE_DEL -> {
@@ -148,42 +169,141 @@ fun SearchScreen(
                 }
             }
     ) {
-        // Query display
-        Box(
+        // Focusable query field. It is a real text field (not a styled label),
+        // so focusing it pulls up the IME and Chinese input works directly.
+        val fieldShape = RoundedCornerShape(10.dp)
+        BasicTextField(
+            value = query,
+            onValueChange = onQueryChange,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(TvColors.Surface)
-                .padding(horizontal = 18.dp),
-            contentAlignment = Alignment.CenterStart
+                .focusRequester(inputRequester)
+                .onFocusChanged { inputFocused = it.isFocused },
+            textStyle = TextStyle(
+                color = TvColors.OnSurface,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Medium
+            ),
+            singleLine = true,
+            cursorBrush = SolidColor(TvColors.Primary),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onSubmit() }),
+            decorationBox = { innerTextField ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .clip(fieldShape)
+                        .background(if (inputFocused) TvColors.SurfaceHigh else TvColors.Surface)
+                        .border(
+                            width = if (inputFocused) 2.dp else 0.dp,
+                            color = if (inputFocused) TvColors.FocusRing else Color.Transparent,
+                            shape = fieldShape
+                        )
+                        .padding(horizontal = 18.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (query.isEmpty()) {
+                        Text(
+                            "上焦本框可拉起键盘直接输入；也可用下方全键盘选字母，拼音首字母可搜中文片名",
+                            color = TvColors.OnSurfaceMuted,
+                            fontSize = 14.sp,
+                            maxLines = 1
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        // Recent keywords: tap one to search again, tap its x to remove it.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            if (query.isEmpty()) {
-                Text(
-                    "点击或用方向键选字母，OK 输入；输入拼音首字母即可搜中文片名",
-                    color = TvColors.OnSurfaceMuted,
-                    fontSize = 14.sp
-                )
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        query,
-                        color = TvColors.Primary,
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(Modifier.width(8.dp))
+            Text(
+                "搜索记录",
+                color = TvColors.OnSurface,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.weight(1f))
+            if (searchHistory.isNotEmpty()) {
+                FocusableTile(onClick = onClearHistory, scaleWhenFocused = 1.06f) { f ->
                     Box(
                         modifier = Modifier
-                            .width(2.dp)
-                            .height(26.dp)
-                            .background(TvColors.Primary)
-                    )
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
+                            .tvFocusable(f, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 12.dp, vertical = 5.dp)
+                    ) {
+                        Text(
+                            "清空记录",
+                            color = if (f) TvColors.Danger else TvColors.OnSurfaceMuted,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        if (searchHistory.isEmpty()) {
+            Text(
+                "暂无记录 · 搜索过的关键词会自动保存在这里",
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 12.sp
+            )
+        } else {
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(end = 16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                itemsIndexed(searchHistory, key = { _, kw -> kw }) { _, kw ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        FocusableTile(onClick = { onPickHistory(kw) }) { f ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (f) TvColors.Primary else TvColors.SurfaceHigh)
+                                    .tvFocusable(f, RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    kw,
+                                    color = if (f) Color(0xFF14181D) else TvColors.OnSurface,
+                                    fontSize = 13.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        FocusableTile(
+                            onClick = { onDeleteHistory(kw) },
+                            scaleWhenFocused = 1.06f
+                        ) { f ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (f) TvColors.Danger else TvColors.Surface)
+                                    .tvFocusable(f, RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 9.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    "×",
+                                    color = if (f) Color.White else TvColors.OnSurfaceMuted,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
 
         // Pinyin candidates for the current initials
         if (candidates.isNotEmpty()) {
@@ -254,11 +374,11 @@ fun SearchScreen(
                                     belowOf(ch)?.let { below ->
                                         this.down = requesters[keyPositions.getValue(below)]
                                     }
+                                    // UP from the first letter row always
+                                    // reaches the focusable text field.
+                                    if (rowIndex == 0) this.up = inputRequester
                                 },
-                            onClick = {
-                                flatIndex = index
-                                onInput(ch)
-                            }
+                            onClick = { onInput(ch) }
                         )
                     }
                 }
@@ -302,11 +422,6 @@ fun SearchScreen(
         }
     }
 }
-
-/** Horizontal scroll helper kept readable at the call site. */
-@Composable
-private fun Modifier.horizontalScrollCompat(): Modifier =
-    this.horizontalScroll(rememberScrollState())
 
 @Composable
 private fun LetterKey(

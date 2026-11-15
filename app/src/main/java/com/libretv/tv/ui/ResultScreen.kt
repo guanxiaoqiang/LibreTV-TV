@@ -31,8 +31,8 @@ import com.libretv.tv.data.aggregate
 
 /**
  * Search results, folded by title and drawn with the exact same card as the
- * home feed: 5:7 poster, title below it, and year / source count / best
- * quality / quickest latency as tags on the artwork.
+ * home feed: 5:7 poster, a bottom title bar with the same chip backing as
+ * the year / source count / best quality / quickest latency tags.
  *
  * A fan-out search can return the same movie from ten APIs. Instead of ten
  * near-identical posters the viewer sees one card per title. Opening a card

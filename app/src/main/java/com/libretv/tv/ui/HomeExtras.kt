@@ -16,14 +16,20 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -227,8 +233,19 @@ fun HistoryPage(
     onResume: (WatchRecord) -> Unit,
     onDelete: (String) -> Unit,
     onClear: () -> Unit,
+    leftTarget: FocusRequester? = null,
     modifier: Modifier = Modifier
 ) {
+    val gridState = rememberLazyGridState()
+    // Only the left-most column goes back to the rail slot the viewer came
+    // from; other columns keep their normal in-grid LEFT navigation.
+    val firstColumnIndices: Set<Int> by remember(gridState) {
+        derivedStateOf<Set<Int>> {
+            val visible = gridState.layoutInfo.visibleItemsInfo
+            val leftX = visible.minOfOrNull { it.offset.x } ?: return@derivedStateOf emptySet()
+            visible.filter { it.offset.x == leftX }.map { it.index }.toSet()
+        }
+    }
     Column(modifier = modifier.fillMaxSize()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -249,7 +266,13 @@ fun HistoryPage(
                 )
             }
             if (records.isNotEmpty()) {
-                FocusableTile(onClick = onClear) { focused ->
+                val rail = leftTarget
+                FocusableTile(
+                    onClick = onClear,
+                    modifier = Modifier.focusProperties {
+                        if (rail != null) left = rail
+                    }
+                ) { focused ->
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -285,6 +308,7 @@ fun HistoryPage(
 
         LazyVerticalGrid(
             columns = GridCells.Adaptive(HISTORY_CARD_WIDTH + 12.dp),
+            state = gridState,
             contentPadding = PaddingValues(
                 start = 44.dp, end = 40.dp, top = 12.dp, bottom = 40.dp
             ),
@@ -292,13 +316,23 @@ fun HistoryPage(
             verticalArrangement = Arrangement.spacedBy(22.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            gridItems(records, key = { it.key }) { record ->
+            gridItemsIndexed(records, key = { _, record -> record.key }) { index, record ->
+                val rail = leftTarget
+                val toRail = Modifier.focusProperties {
+                    if (rail != null && index in firstColumnIndices) left = rail
+                }
                 Column {
-                    FocusableTile(onClick = { onResume(record) }) { focused ->
+                    FocusableTile(
+                        onClick = { onResume(record) },
+                        modifier = toRail
+                    ) { focused ->
                         HistoryCard(record = record, focused = focused)
                     }
                     Spacer(Modifier.height(6.dp))
-                    FocusableTile(onClick = { onDelete(record.key) }) { focused ->
+                    FocusableTile(
+                        onClick = { onDelete(record.key) },
+                        modifier = toRail
+                    ) { focused ->
                         Box(
                             modifier = Modifier
                                 .width(HISTORY_CARD_WIDTH)

@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -103,12 +102,12 @@ private fun BadgeChip(badge: FeedBadge) {
 }
 
 /**
- * Poster card shared by 推荐 / 电影 / 剧集 / ... pages.
+ * Poster card shared by 推荐 / 电影 / 剧集 / ... pages and the search results.
  *
- * The artwork keeps the 5:7 shape of the original Douban recommendation card,
- * but the metadata (release year, source count, best quality, quickest
- * response) now lives in tags *on* the poster instead of a text row below it.
- * That keeps all grids visually identical no matter where the titles came from.
+ * Everything lives *inside* the 5:7 artwork: the metadata tags (year, source
+ * count, best quality, quickest response) sit above a full-width title bar at
+ * the very bottom. Both use the same dark rounded backing colour, so nothing
+ * sticks out of the poster when a focused card scales up.
  */
 @Composable
 fun UnifiedPosterCard(
@@ -116,89 +115,94 @@ fun UnifiedPosterCard(
     focused: Boolean,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(0.70f)
-                .clip(RoundedCornerShape(9.dp))
-                .background(TvColors.SurfaceHigh)
-                .tvFocusable(focused, RoundedCornerShape(9.dp))
-        ) {
-            if (card.poster.isNotBlank()) {
-                AsyncImage(
-                    model = card.poster,
-                    contentDescription = card.title,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            } else {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        card.title.take(6),
-                        color = TvColors.OnSurfaceMuted,
-                        fontSize = 13.sp,
-                        maxLines = 2,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
-
-            // Scrim behind the tags so they stay legible on bright artwork.
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(74.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color(0xB8070A0E), Color(0xEE070A0E))
-                        )
-                    )
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(0.70f)
+            .clip(RoundedCornerShape(9.dp))
+            .background(TvColors.SurfaceHigh)
+            .tvFocusable(focused, RoundedCornerShape(9.dp))
+    ) {
+        if (card.poster.isNotBlank()) {
+            AsyncImage(
+                model = card.poster,
+                contentDescription = card.title,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
             )
-
-            if (card.cornerBadge != null) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xDDF5A623))
-                        .padding(horizontal = 5.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        card.cornerBadge,
-                        color = Color(0xFF1A1A1A),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            // Two badges per row keeps four metadata tags readable on a 150 dp
-            // card without covering the whole poster.
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                card.badges.chunked(2).forEach { row ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        row.forEach { BadgeChip(it) }
-                    }
-                }
+        } else {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    card.title.take(6),
+                    color = TvColors.OnSurfaceMuted,
+                    fontSize = 13.sp,
+                    maxLines = 2,
+                    textAlign = TextAlign.Center
+                )
             }
         }
 
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = card.title,
-            color = if (focused) TvColors.Primary else TvColors.OnSurface,
-            fontSize = 13.sp,
-            fontWeight = if (focused) FontWeight.Medium else FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+        // Scrim behind tags + title so they stay legible on bright artwork.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(96.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color(0xB8070A0E), Color(0xEE070A0E))
+                    )
+                )
         )
+
+        if (card.cornerBadge != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xDDF5A623))
+                    .padding(horizontal = 5.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    card.cornerBadge,
+                    color = Color(0xFF1A1A1A),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // Two badges per row keeps four metadata tags readable on a 150 dp
+        // card. The title bar below them uses the same chip backing colour.
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            card.badges.chunked(2).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    row.forEach { BadgeChip(it) }
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(if (focused) Color(0xDD241A20) else Color(0xD10B0E13))
+                    .padding(horizontal = 5.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = card.title,
+                    color = if (focused) TvColors.Primary else TvColors.OnSurface,
+                    fontSize = 12.sp,
+                    fontWeight = if (focused) FontWeight.Medium else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
     }
 }

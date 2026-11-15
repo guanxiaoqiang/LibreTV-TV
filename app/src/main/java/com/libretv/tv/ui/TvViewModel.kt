@@ -11,6 +11,7 @@ import com.libretv.tv.data.DoubanClient
 import com.libretv.tv.data.DoubanSubject
 import com.libretv.tv.data.OfferProbe
 import com.libretv.tv.data.PlayRequest
+import com.libretv.tv.data.SearchHistoryStore
 import com.libretv.tv.data.SearchResult
 import com.libretv.tv.data.SourceOffer
 import com.libretv.tv.data.TitleGroup
@@ -55,6 +56,8 @@ data class UiState(
     val query: String = "",
     val t9Buffer: String = "",
     val t9LastDigit: Int? = null,
+    /** Recent search keywords, newest first, persisted in SharedPreferences. */
+    val searchHistory: List<String> = emptyList(),
     val results: List<SearchResult> = emptyList(),
     val searching: Boolean = false,
     val searchedKeyword: String = "",
@@ -68,6 +71,13 @@ data class UiState(
     val health: Map<String, Boolean> = emptyMap(),
     val checkingHealth: Boolean = false,
     val homeTab: HomeTab = HomeTab.RECOMMEND,
+    /**
+     * Last focused slot on the left rail. Keeping it in the view model (rather
+     * than a local remember) survives leaving HOME for search / playback, so
+     * LEFT from the content grid and a return from another page both land on
+     * the entry the viewer actually came from.
+     */
+    val railFocusIndex: Int = 0,
     /** Selected chip at the top of the content page. */
     val genre: String = "热门",
     /** Cards currently loaded for this tab + genre (all of them, not just visible). */
@@ -185,6 +195,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     private val client = CmsClient()
     private val douban = DoubanClient()
     val historyStore = WatchHistoryStore(app)
+    private val searchHistoryStore = SearchHistoryStore(app)
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -230,6 +241,11 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value = _state.value.copy(history = records)
             }
         }
+        viewModelScope.launch {
+            searchHistoryStore.keywords.collect { words ->
+                _state.value = _state.value.copy(searchHistory = words)
+            }
+        }
         // The recommend strip does not depend on the category trees.
         val first = HomeTab.RECOMMEND.genres().first()
         startFeed(HomeTab.RECOMMEND, first, reset = true)
@@ -240,6 +256,12 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     private fun feedKey(tab: HomeTab, genre: String) = "${tab.name}|$genre"
 
     private fun isActive(key: String): Boolean = activeFeedKey == key
+
+    /** Remember the rail slot the viewer left before moving into the content. */
+    fun setRailFocus(index: Int) {
+        if (index < 0 || _state.value.railFocusIndex == index) return
+        _state.value = _state.value.copy(railFocusIndex = index)
+    }
 
     fun setHomeTab(tab: HomeTab) {
         // Focus alone selects a tab, so a focus event and a touch tap can ask
@@ -792,6 +814,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     fun searchDoubanTitle(subject: DoubanSubject) {
         val title = subject.title.trim()
         if (title.isEmpty()) return
+        searchHistoryStore.add(title)
         _state.value = _state.value.copy(
             query = title,
             t9Buffer = "",
@@ -919,9 +942,18 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(query = q, t9Buffer = "", t9LastDigit = null)
     }
 
+    fun deleteSearchHistory(keyword: String) {
+        searchHistoryStore.delete(keyword)
+    }
+
+    fun clearSearchHistory() {
+        searchHistoryStore.clear()
+    }
+
     fun submitSearch(keyword: String = _state.value.query) {
         val kw = keyword.trim()
         if (kw.isEmpty()) return
+        searchHistoryStore.add(kw)
         val letters = rawLetters()
         _state.value = _state.value.copy(
             screen = Screen.RESULT,
