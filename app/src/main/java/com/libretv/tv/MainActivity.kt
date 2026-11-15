@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.OndemandVideo
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Theaters
 import androidx.compose.material.icons.filled.ThumbUp
@@ -70,7 +71,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.libretv.tv.data.AdFilterSettings
 import com.libretv.tv.data.CmsClient
 import com.libretv.tv.data.DoubanSubject
 import com.libretv.tv.data.PlayRequest
@@ -90,6 +90,7 @@ import com.libretv.tv.ui.PlayerScreen
 import com.libretv.tv.ui.ResultScreen
 import com.libretv.tv.ui.Screen
 import com.libretv.tv.ui.SearchScreen
+import com.libretv.tv.ui.SettingsScreen
 import com.libretv.tv.ui.SourcePickerScreen
 import com.libretv.tv.ui.SourcesScreen
 import com.libretv.tv.ui.TvBackgroundBrush
@@ -150,8 +151,6 @@ fun TvApp(vm: TvViewModel = viewModel()) {
     val scope = rememberCoroutineScope()
     val repo = remember { SourceRepository(app) }
     val client = remember { CmsClient() }
-    val adFilterSettings = remember { AdFilterSettings(app) }
-    var adFilterEnabled by remember { mutableStateOf(adFilterSettings.enabled) }
 
     // The whole playback request lives here rather than as loose strings: the
     // player needs the url, while the history store needs the source and the
@@ -209,7 +208,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
         Screen.HOME -> HomeLayout(
             state = state,
             onSearch = { vm.navigate(Screen.SEARCH) },
-            onSources = { vm.navigate(Screen.SOURCES) },
+            onSources = { vm.navigate(Screen.SETTINGS) },
             onSelectTab = { vm.setHomeTab(it) },
             onRailFocus = { vm.setRailFocus(it) },
             onSelectGenre = { vm.setGenre(it) },
@@ -241,6 +240,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             keyword = state.searchedKeyword,
             results = state.results,
             searching = state.searching,
+            showBadges = state.posterBadgesEnabled,
             // Douban-driven results return to the recommend page they came
             // from; keyboard-driven results keep the normal results <- detail
             // <- search chain.
@@ -314,7 +314,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
                     episodes = eps,
                     currentEpisodeIndex = curIdx,
                     startPositionMs = request.startPositionMs,
-                    adFilterEnabled = adFilterEnabled,
+                    adFilterEnabled = state.adFilterEnabled,
                     onProgress = { position, duration ->
                         vm.saveProgress(request, position, duration)
                     },
@@ -361,16 +361,27 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             }
         }
 
+        Screen.SETTINGS -> SettingsScreen(
+            adFilterEnabled = state.adFilterEnabled,
+            posterBadgesEnabled = state.posterBadgesEnabled,
+            sourceCount = state.sourceEntries.size,
+            enabledSourceCount = state.sourceEntries.count { it.enabled },
+            onToggleAdFilter = { vm.setAdFilterEnabled(!state.adFilterEnabled) },
+            onTogglePosterBadges = { vm.setPosterBadgesEnabled(!state.posterBadgesEnabled) },
+            onOpenSources = { vm.navigate(Screen.SOURCES) },
+            onBack = { vm.back() }
+        )
+
         Screen.SOURCES -> SourcesScreen(
-            sources = state.sources,
-            health = state.health,
-            checking = state.checkingHealth,
-            adFilterEnabled = adFilterEnabled,
-            onToggleAdFilter = {
-                adFilterEnabled = !adFilterEnabled
-                adFilterSettings.enabled = adFilterEnabled
-            },
-            onCheck = { vm.checkHealth() },
+            entries = state.sourceEntries,
+            health = state.sourceHealth,
+            testingUrl = state.testingSource,
+            onToggleSource = { url, enabled -> vm.setSourceEnabled(url, enabled) },
+            onTestSource = { vm.testSource(it) },
+            onTestAll = { vm.testAllSources() },
+            onRemoveSource = { vm.removeSource(it) },
+            onAddSource = { name, url -> vm.addSource(name, url) },
+            onResetSources = { vm.resetSources() },
             onBack = { vm.back() }
         )
     }
@@ -404,7 +415,7 @@ private fun HomeLayout(
             tabs.forEach { tab ->
                 add(RailEntry(label = tab.label, icon = tabIcon(tab), tab = tab))
             }
-            add(RailEntry("源管理", icon = Icons.Filled.Storage, action = 1))
+            add(RailEntry("设置", icon = Icons.Filled.Settings, action = 1))
         }
     }
     val railRequesters = remember { List(railEntries.size) { FocusRequester() } }
@@ -642,6 +653,7 @@ private fun HomeFeedPage(
                     UnifiedPosterCard(
                         card = card,
                         focused = focused,
+                        showBadges = state.posterBadgesEnabled,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }

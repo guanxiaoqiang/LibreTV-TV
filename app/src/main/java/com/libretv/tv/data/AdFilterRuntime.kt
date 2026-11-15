@@ -14,20 +14,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 
-/** Persisted switch, mirroring LibreTV's "广告切片过滤" setting. */
-class AdFilterSettings(context: Context) {
-    private val prefs = context.applicationContext
-        .getSharedPreferences("libretv_settings", Context.MODE_PRIVATE)
-
-    var enabled: Boolean
-        get() = prefs.getBoolean(KEY, true)
-        set(value) = prefs.edit().putBoolean(KEY, value).apply()
-
-    private companion object {
-        const val KEY = "ad_filter_enabled"
-    }
-}
-
 /** Running count of removed ad segments, shown on the player's top bar. */
 object AdFilterStats {
     private val _removed = MutableStateFlow(0)

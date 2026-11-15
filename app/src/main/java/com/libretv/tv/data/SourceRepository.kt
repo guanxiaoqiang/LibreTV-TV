@@ -204,6 +204,44 @@ class SourceRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Test one source and report both reachability and round-trip time.
+     *
+     * The source settings page shows this per row, so the measurement has to
+     * be cheap: a single search call against the collector, timed. A source
+     * that answers with data is reachable; anything else (timeout, HTTP error,
+     * malformed body) is reported as unreachable with the reason.
+     */
+    suspend fun probeWithLatency(source: SourceConfig, client: CmsClient): SourceHealth {
+        val started = System.currentTimeMillis()
+        return try {
+            val items = client.search(source.url, "test")
+            val elapsed = System.currentTimeMillis() - started
+            if (items != null) {
+                SourceHealth(reachable = true, latencyMs = elapsed)
+            } else {
+                SourceHealth(reachable = false, latencyMs = elapsed, error = "无响应数据")
+            }
+        } catch (e: Exception) {
+            val elapsed = System.currentTimeMillis() - started
+            SourceHealth(
+                reachable = false,
+                latencyMs = elapsed,
+                error = e.message?.takeIf { it.isNotBlank() } ?: "连接失败"
+            )
+        }
+    }
+
+    /** Test every source at once and return one health record per source. */
+    suspend fun probeAll(
+        sources: List<SourceConfig>,
+        client: CmsClient
+    ): Map<String, SourceHealth> = coroutineScope {
+        sources.map { source ->
+            async(Dispatchers.IO) { source.url to probeWithLatency(source, client) }
+        }.awaitAll().toMap()
+    }
+
     suspend fun fetchDetail(
         source: SourceConfig,
         item: VodItem,

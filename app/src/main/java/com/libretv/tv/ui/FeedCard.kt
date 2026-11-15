@@ -113,6 +113,7 @@ private fun BadgeChip(badge: FeedBadge) {
 fun UnifiedPosterCard(
     card: FeedCard,
     focused: Boolean,
+    showBadges: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -175,6 +176,8 @@ fun UnifiedPosterCard(
 
         // Two badges per row keeps four metadata tags readable on a 150 dp
         // card. The title bar below them uses the same chip backing colour.
+        // The whole tag block can be switched off in the settings, which
+        // leaves a clean poster with just the title.
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -182,9 +185,11 @@ fun UnifiedPosterCard(
                 .padding(6.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            card.badges.chunked(2).forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    row.forEach { BadgeChip(it) }
+            if (showBadges) {
+                card.badges.chunked(2).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        row.forEach { BadgeChip(it) }
+                    }
                 }
             }
             Box(

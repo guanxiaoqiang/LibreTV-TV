@@ -43,6 +43,7 @@ fun ResultScreen(
     keyword: String,
     results: List<SearchResult>,
     searching: Boolean,
+    showBadges: Boolean = true,
     onOpenGroup: (TitleGroup) -> Unit,
     onBack: () -> Unit
 ) {
@@ -133,6 +134,7 @@ fun ResultScreen(
                     UnifiedPosterCard(
                         card = card,
                         focused = focused,
+                        showBadges = showBadges,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }

@@ -3,6 +3,7 @@ package com.libretv.tv.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.libretv.tv.data.AppSettings
 import com.libretv.tv.data.CategoryCatalog
 import com.libretv.tv.data.aggregate
 import com.libretv.tv.data.CmsClient
@@ -14,10 +15,14 @@ import com.libretv.tv.data.PlayRequest
 import com.libretv.tv.data.SearchHistoryStore
 import com.libretv.tv.data.SearchResult
 import com.libretv.tv.data.SearchSuggestions
+import com.libretv.tv.data.SourceEntry
+import com.libretv.tv.data.SourceHealth
+import com.libretv.tv.data.SourceMerger
 import com.libretv.tv.data.SourceOffer
 import com.libretv.tv.data.TitleGroup
 import com.libretv.tv.data.SourceConfig
 import com.libretv.tv.data.SourceRepository
+import com.libretv.tv.data.SourceStore
 import com.libretv.tv.data.VodClass
 import com.libretv.tv.data.WatchHistoryStore
 import com.libretv.tv.data.WatchRecord
@@ -33,7 +38,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class Screen { HOME, SEARCH, RESULT, SOURCE_PICKER, DETAIL, PLAYER, SOURCES }
+enum class Screen { HOME, SEARCH, RESULT, SOURCE_PICKER, DETAIL, PLAYER, SETTINGS, SOURCES }
 
 /**
  * Pages in left-rail order. [doubanType] selects the movie / tv feed used by
@@ -53,7 +58,18 @@ enum class HomeTab(val label: String, val doubanType: String) {
 
 data class UiState(
     val screen: Screen = Screen.HOME,
+    /** Enabled collectors, used by every fan-out search and category probe. */
     val sources: List<SourceConfig> = emptyList(),
+    /** Every collector, including the disabled ones, for the source settings page. */
+    val sourceEntries: List<SourceEntry> = emptyList(),
+    /** Per-source test result, keyed by the source URL. */
+    val sourceHealth: Map<String, SourceHealth> = emptyMap(),
+    /** URL of the source currently being tested, if any. */
+    val testingSource: String? = null,
+    /** Strip ad segments out of HLS playlists. */
+    val adFilterEnabled: Boolean = true,
+    /** Show the metadata tags on the poster artwork. */
+    val posterBadgesEnabled: Boolean = true,
     val query: String = "",
     val t9Buffer: String = "",
     val t9LastDigit: Int? = null,
@@ -69,8 +85,6 @@ data class UiState(
     val activeEpisode: Int = 0,
     val detailFrom: Screen = Screen.SEARCH,
     val error: String? = null,
-    val health: Map<String, Boolean> = emptyMap(),
-    val checkingHealth: Boolean = false,
     val homeTab: HomeTab = HomeTab.RECOMMEND,
     /**
      * Last focused slot on the left rail. Keeping it in the view model (rather
@@ -195,6 +209,8 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = SourceRepository(app)
     private val client = CmsClient()
     private val douban = DoubanClient()
+    private val appSettings = AppSettings(app)
+    private val sourceStore = SourceStore(app)
     val historyStore = WatchHistoryStore(app)
     private val searchHistoryStore = SearchHistoryStore(app)
 
@@ -213,29 +229,19 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     /** pinyin-initial -> Chinese title, so a TV remote alone can reach a title. */
     private var titleIndex: Map<String, String> = emptyMap()
 
+    /** The read-only list shipped in assets, before the viewer's edits. */
+    private var bundledSources: List<SourceConfig> = emptyList()
+
     init {
+        _state.value = _state.value.copy(
+            adFilterEnabled = appSettings.adFilterEnabled,
+            posterBadgesEnabled = appSettings.posterBadgesEnabled
+        )
         viewModelScope.launch {
             val loaded = repo.loadSources()
             titleIndex = repo.loadTitleIndex()
-            _state.value = _state.value.copy(sources = loaded)
-
-            // Every collector numbers its categories differently, so resolve
-            // each source's own name -> id tree once, up front.
-            allCatalogs = repo.allCategoryCatalogs(loaded, client)
-            _state.value = _state.value.copy(
-                categorySourceCount = allCatalogs.size,
-                categoryCatalogReady = true
-            )
-            // A category tab may have been selected before the catalogs arrived.
-            val tab = _state.value.homeTab
-            // Use the *currently selected* chip: the viewer may have switched
-            // genre while the category trees were still being probed.
-            val genre = tab.genres().firstOrNull { it.label == _state.value.genre }
-            if (tab != HomeTab.HISTORY && tab != HomeTab.RECOMMEND &&
-                genre != null && feedCache[feedKey(tab, genre.label)] == null
-            ) {
-                startFeed(tab, genre, reset = true)
-            }
+            applySourceEntries(loaded)
+            reloadCatalogs()
         }
         viewModelScope.launch {
             historyStore.records.collect { records ->
@@ -849,8 +855,10 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             Screen.DETAIL -> s.copy(screen = s.detailFrom)
             Screen.SOURCE_PICKER -> s.copy(screen = s.pickerFrom)
             Screen.RESULT -> s.copy(screen = s.resultFrom)
+            // The source list is a sub-page of the settings page.
+            Screen.SOURCES -> s.copy(screen = Screen.SETTINGS)
+            Screen.SETTINGS -> s.copy(screen = Screen.HOME)
             Screen.SEARCH -> s.copy(screen = Screen.HOME)
-            Screen.SOURCES -> s.copy(screen = Screen.HOME)
             Screen.HOME -> s
         }
     }
@@ -1091,17 +1099,133 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(activeEpisode = index)
     }
 
-    // ---------- source health ----------
+    // ---------- settings ----------
 
-    fun checkHealth() {
-        if (_state.value.checkingHealth) return
-        _state.value = _state.value.copy(checkingHealth = true, health = emptyMap())
+    /** Rebuild the source list from the bundled list plus the viewer's edits. */
+    private fun applySourceEntries(bundled: List<SourceConfig>) {
+        bundledSources = bundled
+        val entries = SourceMerger.merge(
+            bundled = bundled,
+            custom = sourceStore.customSources,
+            removedUrls = sourceStore.removedUrls,
+            disabledUrls = sourceStore.disabledUrls
+        )
+        _state.value = _state.value.copy(
+            sourceEntries = entries,
+            // Disabled collectors are skipped by every fan-out.
+            sources = entries.filter { it.enabled }.map { it.config }
+        )
+    }
+
+    /**
+     * Re-probe the category trees of the currently enabled collectors.
+     *
+     * Every collector numbers its categories differently, so the home screen
+     * needs each source's own name -> id tree. Enabling or disabling a
+     * collector changes that set, so the trees are read again and the strip
+     * of the tab the viewer is looking at is rebuilt.
+     */
+    private fun reloadCatalogs() {
         viewModelScope.launch {
-            val sources = _state.value.sources
-            val results = sources.associate { source ->
-                source.name to repo.probe(source, client)
+            allCatalogs = repo.allCategoryCatalogs(_state.value.sources, client)
+            _state.value = _state.value.copy(
+                categorySourceCount = allCatalogs.size,
+                categoryCatalogReady = true
+            )
+            // The cached strips were built from the old source set.
+            feedCache.clear()
+            val tab = _state.value.homeTab
+            // Use the *currently selected* chip: the viewer may have switched
+            // genre while the category trees were still being probed.
+            val genre = tab.genres().firstOrNull { it.label == _state.value.genre }
+            if (tab != HomeTab.HISTORY && tab != HomeTab.RECOMMEND && genre != null) {
+                startFeed(tab, genre, reset = true)
             }
-            _state.value = _state.value.copy(health = results, checkingHealth = false)
+        }
+    }
+
+    fun setAdFilterEnabled(enabled: Boolean) {
+        appSettings.adFilterEnabled = enabled
+        _state.value = _state.value.copy(adFilterEnabled = enabled)
+    }
+
+    fun setPosterBadgesEnabled(enabled: Boolean) {
+        appSettings.posterBadgesEnabled = enabled
+        _state.value = _state.value.copy(posterBadgesEnabled = enabled)
+    }
+
+    // ---------- source management ----------
+
+    /** Switch one collector on or off. Disabled collectors stop being queried. */
+    fun setSourceEnabled(url: String, enabled: Boolean) {
+        val disabled = sourceStore.disabledUrls.toMutableSet()
+        if (enabled) disabled.remove(url) else disabled.add(url)
+        sourceStore.disabledUrls = disabled
+        applySourceEntries(bundledSources)
+        reloadCatalogs()
+    }
+
+    /** Delete a collector (bundled or custom). */
+    fun removeSource(url: String) {
+        val custom = sourceStore.customSources
+        val isCustom = custom.any { it.url == url }
+        if (isCustom) {
+            sourceStore.customSources = custom.filterNot { it.url == url }
+        } else {
+            sourceStore.removedUrls = sourceStore.removedUrls + url
+        }
+        sourceStore.disabledUrls = sourceStore.disabledUrls - url
+        applySourceEntries(bundledSources)
+        reloadCatalogs()
+    }
+
+    /** Add a collector by hand. The name is optional; the URL is required. */
+    fun addSource(name: String, url: String): Boolean {
+        val cleanUrl = url.trim()
+        if (cleanUrl.isEmpty() || !cleanUrl.startsWith("http")) return false
+        val exists = _state.value.sourceEntries.any { it.url == cleanUrl }
+        if (exists) return false
+        val cleanName = name.trim().ifEmpty { cleanUrl.substringAfter("://").substringBefore("/") }
+        sourceStore.customSources = sourceStore.customSources + SourceConfig(cleanName, cleanUrl)
+        applySourceEntries(bundledSources)
+        reloadCatalogs()
+        return true
+    }
+
+    /** Undo every source edit and go back to the bundled list. */
+    fun resetSources() {
+        sourceStore.reset()
+        applySourceEntries(bundledSources)
+        reloadCatalogs()
+    }
+
+    /** Test one collector and store its reachability and round-trip time. */
+    fun testSource(url: String) {
+        val source = _state.value.sourceEntries.firstOrNull { it.url == url }?.config ?: return
+        if (_state.value.testingSource != null) return
+        _state.value = _state.value.copy(testingSource = url)
+        viewModelScope.launch {
+            val health = repo.probeWithLatency(source, client)
+            _state.value = _state.value.copy(
+                sourceHealth = _state.value.sourceHealth + (url to health),
+                testingSource = null
+            )
+        }
+    }
+
+    /** Test every collector at once; each row keeps its own result. */
+    fun testAllSources() {
+        if (_state.value.testingSource != null) return
+        val targets = _state.value.sourceEntries.map { it.config }
+        if (targets.isEmpty()) return
+        _state.value = _state.value.copy(testingSource = "")
+        viewModelScope.launch {
+            val results = repo.probeAll(targets, client)
+            _state.value = _state.value.copy(
+                sourceHealth = _state.value.sourceHealth + results,
+                testingSource = null
+            )
         }
     }
 }
+
