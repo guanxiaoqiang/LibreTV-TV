@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,15 +28,15 @@ import androidx.compose.ui.unit.sp
 import com.libretv.tv.data.SearchResult
 import com.libretv.tv.data.TitleGroup
 import com.libretv.tv.data.aggregate
-import com.libretv.tv.data.formatLatency
 
 /**
- * Search results, folded by title.
+ * Search results, folded by title and drawn with the exact same card as the
+ * home feed: 5:7 poster, title below it, and year / source count / best
+ * quality / quickest latency as tags on the artwork.
  *
  * A fan-out search can return the same movie from ten APIs. Instead of ten
- * near-identical posters the viewer sees one card per title, badged with how
- * many sources carry it, the best quality hint and the quickest response time.
- * Opening a card goes to the source picker.
+ * near-identical posters the viewer sees one card per title. Opening a card
+ * goes to the source picker (or straight to the detail page for one source).
  */
 @Composable
 fun ResultScreen(
@@ -46,15 +47,18 @@ fun ResultScreen(
     onBack: () -> Unit
 ) {
     val groups = remember(results) { aggregate(results) }
+    val cards = remember(groups) { groups.map { it.asFeedCard() } }
     val sourceCount = remember(results) { results.map { it.sourceName }.distinct().size }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 40.dp, vertical = 28.dp)
+            .padding(top = 22.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 44.dp, end = 40.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(Modifier.weight(1f)) {
@@ -89,7 +93,7 @@ fun ResultScreen(
             }
         }
 
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(8.dp))
 
         if (searching && results.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -114,21 +118,22 @@ fun ResultScreen(
         }
 
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(158.dp),
+            columns = GridCells.Adaptive(150.dp),
+            contentPadding = PaddingValues(
+                // Top inset gives the 1.09x focused card room to grow without
+                // being clipped by the grid viewport, exactly like the home page.
+                start = 44.dp, end = 40.dp, top = 20.dp, bottom = 40.dp
+            ),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            verticalArrangement = Arrangement.spacedBy(22.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            items(groups, key = { it.key }) { group ->
-                FocusableTile(onClick = { onOpenGroup(group) }) { f ->
-                    PosterCard(
-                        title = group.title,
-                        poster = group.poster,
-                        remarks = group.year.ifBlank { group.typeName },
-                        sourceName = "",
-                        cornerBadge = "${group.offers.size} 源",
-                        footerNote = "${group.bestQuality.short} · ${formatLatency(group.fastestMs)}",
-                        focused = f
+            items(cards, key = { it.key }) { card ->
+                FocusableTile(onClick = { card.group?.let(onOpenGroup) }) { focused ->
+                    UnifiedPosterCard(
+                        card = card,
+                        focused = focused,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }

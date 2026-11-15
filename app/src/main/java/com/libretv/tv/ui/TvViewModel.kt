@@ -58,6 +58,8 @@ data class UiState(
     val results: List<SearchResult> = emptyList(),
     val searching: Boolean = false,
     val searchedKeyword: String = "",
+    /** Where the result page was opened from: SEARCH keyboard or HOME (Douban). */
+    val resultFrom: Screen = Screen.SEARCH,
     val detail: DetailBundle? = null,
     val activeLine: Int = 0,
     val activeEpisode: Int = 0,
@@ -695,18 +697,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
 
-    private fun groupCard(group: TitleGroup): FeedCard = FeedCard(
-        key = "g|${group.key}",
-        title = group.title,
-        poster = group.poster,
-        badges = listOf(
-            FeedBadge(group.year.ifBlank { "年份未知" }, FeedBadgeKind.NEUTRAL),
-            FeedBadge("${group.playableCount} 源", FeedBadgeKind.ACCENT),
-            FeedBadge(group.bestQuality.short, FeedBadgeKind.QUALITY),
-            FeedBadge(shortLatency(group.fastestMs), FeedBadgeKind.LATENCY)
-        ),
-        group = group
-    )
+    private fun groupCard(group: TitleGroup): FeedCard = group.asFeedCard()
 
     private fun doubanCard(subject: DoubanSubject): FeedCard = FeedCard(
         key = "d|${subject.id.ifBlank { subject.title }}",
@@ -720,12 +711,6 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         ),
         subject = subject
     )
-
-    private fun shortLatency(ms: Long): String = when {
-        ms <= 0L -> "延时未知"
-        ms < 1000L -> "$ms ms"
-        else -> "%.1f s".format(ms / 1000.0)
-    }
 
     /** Commit one strip into the UI state and keep it cached for chip switches. */
     private fun publish(
@@ -815,6 +800,10 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             searching = true,
             results = emptyList(),
             searchedKeyword = title,
+            // A Douban card was clicked on the recommend page, so BACK from
+            // these results (and from anything opened out of them) must land
+            // back on that page — never on the keyboard search screen.
+            resultFrom = Screen.HOME,
             error = null
         )
         searchJob?.cancel()
@@ -835,12 +824,21 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             Screen.PLAYER -> s.copy(screen = Screen.DETAIL)
             Screen.DETAIL -> s.copy(screen = s.detailFrom)
             Screen.SOURCE_PICKER -> s.copy(screen = s.pickerFrom)
-            Screen.RESULT -> s.copy(screen = Screen.SEARCH)
+            Screen.RESULT -> s.copy(screen = s.resultFrom)
             Screen.SEARCH -> s.copy(screen = Screen.HOME)
             Screen.SOURCES -> s.copy(screen = Screen.HOME)
             Screen.HOME -> s
         }
     }
+
+    /**
+     * Back target for a card opened from the results page. When the results
+     * came from a Douban recommendation, detail / source-picker pages return
+     * straight to the recommend page instead of unwinding through the results
+     * and the keyboard search screen.
+     */
+    fun resultBackTarget(): Screen =
+        if (_state.value.resultFrom == Screen.HOME) Screen.HOME else Screen.RESULT
 
     // ---------- Keyboard search input ----------
 
@@ -931,6 +929,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             searching = true,
             results = emptyList(),
             searchedKeyword = kw,
+            resultFrom = Screen.SEARCH,
             error = null
         )
         searchJob?.cancel()

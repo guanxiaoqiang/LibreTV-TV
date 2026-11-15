@@ -52,6 +52,30 @@ data class FeedCard(
     val subject: DoubanSubject? = null
 )
 
+internal fun shortLatency(ms: Long): String = when {
+    ms <= 0L -> "延时未知"
+    ms < 1000L -> "$ms ms"
+    else -> "%.1f s".format(ms / 1000.0)
+}
+
+/**
+ * The one canonical renderer data for an aggregated title. Both the home feed
+ * and the search results call this, so a card looks identical everywhere and
+ * the year / source count / best quality / quickest latency tags never drift.
+ */
+fun TitleGroup.asFeedCard(): FeedCard = FeedCard(
+    key = "g|$key",
+    title = title,
+    poster = poster,
+    badges = listOf(
+        FeedBadge(year.ifBlank { "年份未知" }, FeedBadgeKind.NEUTRAL),
+        FeedBadge("$playableCount 源", FeedBadgeKind.ACCENT),
+        FeedBadge(bestQuality.short, FeedBadgeKind.QUALITY),
+        FeedBadge(shortLatency(fastestMs), FeedBadgeKind.LATENCY)
+    ),
+    group = this
+)
+
 private fun badgeColor(kind: FeedBadgeKind): Color = when (kind) {
     FeedBadgeKind.NEUTRAL -> Color(0xFFE6EDF3)
     FeedBadgeKind.ACCENT -> TvColors.Primary

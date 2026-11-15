@@ -23,7 +23,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.relocation.BringIntoViewRequester
@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -231,7 +232,10 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             keyword = state.searchedKeyword,
             results = state.results,
             searching = state.searching,
-            onOpenGroup = { vm.openGroupOrDetail(it, Screen.RESULT) },
+            // Douban-driven results return to the recommend page they came
+            // from; keyboard-driven results keep the normal results <- detail
+            // <- search chain.
+            onOpenGroup = { vm.openGroupOrDetail(it, vm.resultBackTarget()) },
             onBack = { vm.back() }
         )
 
@@ -506,6 +510,23 @@ private fun HomeFeedPage(
     val chipRequesters = remember(genres.size) { List(genres.size) { FocusRequester() } }
     val gridState = rememberLazyGridState()
 
+    // Remember which top chip the viewer came down from. Going back UP from a
+    // card must land on that exact chip instead of the geometrically nearest
+    // one (which is what the default 2D focus search would pick).
+    var lastChipIndex by remember(state.homeTab) { mutableStateOf(0) }
+    val upChip = chipRequesters.getOrNull(lastChipIndex) ?: chipRequesters.firstOrNull()
+
+    // Only the top row of the grid is wired to the chip strip; deeper rows
+    // keep the normal row-by-row D-pad behaviour.
+    val firstRowIndices: Set<Int> by remember(gridState) {
+        derivedStateOf<Set<Int>> {
+            if (gridState.firstVisibleItemIndex != 0) return@derivedStateOf emptySet()
+            val visible = gridState.layoutInfo.visibleItemsInfo
+            val topY = visible.minOfOrNull { it.offset.y } ?: return@derivedStateOf emptySet()
+            visible.filter { it.offset.y == topY }.map { it.index }.toSet()
+        }
+    }
+
     // A tab / genre switch always starts at the top of its own grid.
     LaunchedEffect(state.homeTab, state.genre) {
         gridState.scrollToItem(0)
@@ -534,7 +555,8 @@ private fun HomeFeedPage(
             genres = genres,
             current = state.genre,
             requesters = chipRequesters,
-            onSelect = onSelectGenre
+            onSelect = onSelectGenre,
+            onFocused = { lastChipIndex = it }
         )
 
         if (state.feedLoading && state.feed.isEmpty()) {
@@ -562,14 +584,27 @@ private fun HomeFeedPage(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-            gridItems(state.feed.take(state.feedVisible), key = { it.key }) { card ->
+            gridItemsIndexed(
+                items = state.feed.take(state.feedVisible),
+                key = { _, card -> card.key }
+            ) { index, card ->
+                // DOWN from a chip is left to Compose's 2D focus search, which
+                // already picks the nearest card below. UP is explicit so the
+                // viewer returns to the chip they originally left.
+                val upTarget = upChip
+                val upModifier = if (upTarget != null && index in firstRowIndices) {
+                    Modifier.focusProperties { up = upTarget }
+                } else {
+                    Modifier
+                }
                 FocusableTile(
                     onClick = {
                         when {
                             card.group != null -> onPickGroup(card.group)
                             card.subject != null -> onPickDouban(card.subject)
                         }
-                    }
+                    },
+                    modifier = upModifier
                 ) { focused ->
                     UnifiedPosterCard(
                         card = card,
@@ -636,7 +671,8 @@ private fun GenreStrip(
     genres: List<HomeGenre>,
     current: String,
     requesters: List<FocusRequester>,
-    onSelect: (String) -> Unit
+    onSelect: (String) -> Unit,
+    onFocused: (Int) -> Unit
 ) {
     LazyRow(
         // Vertical padding keeps focused chips (1.06x scale) inside the row and
@@ -655,7 +691,12 @@ private fun GenreStrip(
             ) { focused ->
                 if (focused) {
                     // Genre chips select on focus, just like the left rail tabs.
-                    LaunchedEffect(genre.label) { onSelect(genre.label) }
+                    // Remember the slot as well, so UP from the grid returns
+                    // here rather than to a neighbouring chip.
+                    LaunchedEffect(genre.label, index) {
+                        onFocused(index)
+                        onSelect(genre.label)
+                    }
                 }
                 GenreChip(
                     label = genre.label,
