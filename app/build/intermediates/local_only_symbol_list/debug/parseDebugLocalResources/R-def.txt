@@ -1,0 +1,21 @@
+R_DEF: Internal format may change without notice
+local
+color tv_accent
+color tv_bg
+drawable app_banner
+id player_view
+layout view_player
+mipmap ic_launcher
+string app_name
+string back
+string episodes
+string home
+string loading
+string no_result
+string play
+string search
+string search_hint
+string sources
+string t9_hint
+style Theme.LibreTV
+xml backup_rules
