@@ -232,7 +232,7 @@ fun HistoryPage(
     Column(modifier = modifier.fillMaxSize()) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 40.dp, end = 40.dp, top = 8.dp, bottom = 14.dp)
+            modifier = Modifier.padding(start = 44.dp, end = 40.dp, top = 8.dp, bottom = 14.dp)
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
@@ -285,9 +285,11 @@ fun HistoryPage(
 
         LazyVerticalGrid(
             columns = GridCells.Adaptive(HISTORY_CARD_WIDTH + 12.dp),
-            contentPadding = PaddingValues(start = 40.dp, end = 40.dp, bottom = 40.dp),
+            contentPadding = PaddingValues(
+                start = 44.dp, end = 40.dp, top = 12.dp, bottom = 40.dp
+            ),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            verticalArrangement = Arrangement.spacedBy(22.dp),
             modifier = Modifier.fillMaxSize()
         ) {
             gridItems(records, key = { it.key }) { record ->
@@ -324,7 +326,7 @@ fun CategoryHint(text: String, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(start = 40.dp, end = 40.dp, top = 24.dp, bottom = 24.dp),
+            .padding(start = 44.dp, end = 40.dp, top = 24.dp, bottom = 24.dp),
         contentAlignment = Alignment.CenterStart
     ) {
         Text(text, color = TvColors.OnSurfaceMuted, fontSize = 14.sp)

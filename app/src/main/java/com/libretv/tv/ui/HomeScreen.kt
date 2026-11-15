@@ -80,15 +80,16 @@ fun NavItem(
     label: String,
     focused: Boolean,
     modifier: Modifier = Modifier,
-    badge: String? = null,
     selected: Boolean = false,
     icon: ImageVector = Icons.Filled.PlayArrow
 ) {
     val shape = RoundedCornerShape(10.dp)
     Box(
         modifier = modifier
-            .width(178.dp)
-            .height(44.dp)
+            // Narrower rail: the old 178 dp column pushed the content grid too
+            // far right and wasted a lot of TV width on empty label space.
+            .width(152.dp)
+            .height(42.dp)
             .clip(shape)
             .background(if (focused) TvColors.SurfaceHigh else Color.Transparent)
             .border(
@@ -100,13 +101,13 @@ fun NavItem(
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(start = 14.dp, end = 12.dp),
+                .padding(start = 12.dp, end = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(26.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .size(24.dp)
+                    .clip(RoundedCornerShape(7.dp))
                     .background(if (focused) TvColors.Primary else TvColors.Surface),
                 contentAlignment = Alignment.Center
             ) {
@@ -114,10 +115,10 @@ fun NavItem(
                     imageVector = icon,
                     contentDescription = null,
                     tint = if (focused) Color(0xFF14181D) else TvColors.OnSurfaceMuted,
-                    modifier = Modifier.size(15.dp)
+                    modifier = Modifier.size(14.dp)
                 )
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(9.dp))
             Text(
                 text = label,
                 color = when {
@@ -127,23 +128,10 @@ fun NavItem(
                 },
                 fontSize = if (focused) 15.sp else 14.sp,
                 fontWeight = if (focused || selected) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            if (badge != null) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (focused) Color(0x33FFFFFF) else TvColors.Surface)
-                        .padding(horizontal = 7.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = badge,
-                        color = if (focused) Color.White else TvColors.OnSurfaceMuted,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
         }
     }
 }

@@ -244,12 +244,46 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         // for the same tab within milliseconds. Bail out on a no-op change.
         if (_state.value.homeTab == tab) return
         val genre = tab.genres().firstOrNull()
+        feedJob?.cancel()
+        if (genre == null) {
+            activeFeedKey = ""
+            _state.value = _state.value.copy(
+                homeTab = tab,
+                genre = "热门",
+                feed = emptyList(),
+                feedVisible = 0,
+                feedLoading = false,
+                feedLoadingMore = false,
+                feedHasMore = true,
+                feedNote = "",
+                feedTotalItems = 0,
+                feedDoneTargets = 0,
+                feedTotalTargets = 0
+            )
+            return
+        }
+        val key = feedKey(tab, genre.label)
+        activeFeedKey = key
+        // Re-entering a cached tab must not blank the grid and start a fresh
+        // network round: that produced a visible flash on every D-pad move.
+        val cached = feedCache[key]
+        if (cached != null) {
+            _state.value = _state.value.copy(
+                homeTab = tab,
+                genre = genre.label,
+                feedLoading = false,
+                feedLoadingMore = false,
+                feedTotalTargets = 0
+            )
+            publish(key, cached, minOf(FEED_PAGE_SIZE, cached.cards.size), false, false)
+            return
+        }
         _state.value = _state.value.copy(
             homeTab = tab,
-            genre = genre?.label ?: "热门",
+            genre = genre.label,
             feed = emptyList(),
             feedVisible = 0,
-            feedLoading = genre != null,
+            feedLoading = true,
             feedLoadingMore = false,
             feedHasMore = true,
             feedNote = "",
@@ -257,11 +291,6 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             feedDoneTargets = 0,
             feedTotalTargets = 0
         )
-        if (genre == null) {
-            feedJob?.cancel()
-            activeFeedKey = ""
-            return
-        }
         selectGenreInternal(tab, genre)
     }
 
@@ -269,6 +298,20 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         val tab = _state.value.homeTab
         if (tab == HomeTab.HISTORY || _state.value.genre == label) return
         val genre = tab.genres().firstOrNull { it.label == label } ?: return
+        feedJob?.cancel()
+        val key = feedKey(tab, genre.label)
+        activeFeedKey = key
+        val cached = feedCache[key]
+        if (cached != null) {
+            _state.value = _state.value.copy(
+                genre = label,
+                feedLoading = false,
+                feedLoadingMore = false,
+                feedTotalTargets = 0
+            )
+            publish(key, cached, minOf(FEED_PAGE_SIZE, cached.cards.size), false, false)
+            return
+        }
         _state.value = _state.value.copy(
             genre = label,
             feed = emptyList(),
@@ -425,6 +468,11 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         val old = if (append) feedCache[key] else null
         val raw = old?.rawResults.orEmpty().toMutableList()
         val seen = old?.seenResultKeys.orEmpty().toMutableSet()
+        // The head of the grid is fixed once it has been shown. Every later
+        // collector response may only append cards; it must never re-sort or
+        // rebuild the first screen.
+        var stableCards = old?.cards.orEmpty()
+        var publishedVisible = if (append) _state.value.feedVisible else 0
 
         val channel = Channel<List<SearchResult>>(Channel.UNLIMITED)
         coroutineScope {
@@ -457,26 +505,39 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 raw.addAll(part.filter { seen.add("${it.sourceUrl}|${it.item.vodId}") })
                 done++
-                val snapshot = buildSnapshot(genre, raw, seen, old, keywordFilter, page)
-                // Progressive rendering matters for the first screen only; on a
-                // load-more the list stays put until the whole round is folded in.
-                // feedLoading stays true until the round completes so the infinite
-                // scroll trigger cannot cancel this job mid-flight.
+                val snapshot = buildSnapshot(
+                    genre, raw, seen, old, keywordFilter, page, stableCards
+                )
+                stableCards = snapshot.cards
+                // Publish only while the visible first screen is still filling.
+                // Once it is full, keep aggregating in the background and do a
+                // single final publish — no repeated rebuild of the head cards.
+                // feedLoading stays true until the round completes so the
+                // infinite-scroll trigger cannot cancel this job mid-flight.
                 if (!append) {
-                    publish(
-                        key = key,
-                        snapshot = snapshot,
-                        visible = minOf(FEED_PAGE_SIZE, snapshot.cards.size),
-                        loading = true,
-                        loadingMore = false,
-                        doneTargets = done
-                    )
+                    val desired = minOf(FEED_PAGE_SIZE, snapshot.cards.size)
+                    if (desired > publishedVisible) {
+                        publishedVisible = desired
+                        publish(
+                            key = key,
+                            snapshot = snapshot,
+                            visible = desired,
+                            loading = true,
+                            loadingMore = false,
+                            doneTargets = done
+                        )
+                    }
                 }
             }
         }
         if (!isActive(key)) return
 
-        var snapshot = buildSnapshot(genre, raw, seen, old, keywordFilter, page)
+        // One, and only one, metadata refresh after the round: merge the extra
+        // sources into existing groups while keeping their slots untouched.
+        var snapshot = buildSnapshot(
+            genre, raw, seen, old, keywordFilter, page, stableCards,
+            refreshExisting = true
+        )
         // When a collector has no such sub-category, Douban still gives the
         // chip a meaningful grid (e.g. 美剧 / 英剧 / 韩剧).
         if (snapshot.cards.size < 12 && !append) {
@@ -497,26 +558,36 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    /** Merge a page of raw results into one sorted, filtered card strip. */
+    /**
+     * Merge a page of raw results into one ordered card strip.
+     *
+     * [previousCards] is the order already on screen and is preserved verbatim:
+     * "first loaded stays in front". Aggregation still combines the same title
+     * from more collectors, but the head of the grid is never re-sorted. Brand
+     * new titles are appended in the genre's sort order. [refreshExisting]
+     * updates offer metadata of those head cards exactly once, at the end of a
+     * round, and only for cards whose data actually changed.
+     */
     private fun buildSnapshot(
         genre: HomeGenre,
         raw: List<SearchResult>,
         seen: Set<String>,
         old: FeedSnapshot?,
         keywordFilter: Boolean,
-        page: Int
+        page: Int,
+        previousCards: List<FeedCard>,
+        refreshExisting: Boolean = false
     ): FeedSnapshot {
         var groups = aggregate(raw).filter { it.playableCount > 0 }
         if (keywordFilter && genre.keywords.isNotEmpty()) {
             groups = groups.filter { matchesGenre(it, genre.keywords) }
         }
         groups = sortGroups(groups, genre.sort)
-
-        val cards = buildList {
-            addAll(groups.map { groupCard(it) })
-            // Keep discovery cards fetched on an earlier round.
-            addAll(old?.cards.orEmpty().filter { it.subject != null })
-        }.distinctBy { it.key }
+        val cards = mergeStableCards(
+            previous = previousCards,
+            incoming = groups.map { groupCard(it) },
+            refreshExisting = refreshExisting
+        )
 
         return FeedSnapshot(
             cards = cards,

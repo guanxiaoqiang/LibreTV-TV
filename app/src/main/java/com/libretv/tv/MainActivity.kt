@@ -120,11 +120,13 @@ class MainActivity : ComponentActivity() {
  */
 private data class RailEntry(
     val label: String,
-    val badge: String? = null,
     val icon: ImageVector,
     val tab: HomeTab? = null,
     val action: Int? = null
 )
+
+/** Shared left inset of every content row, aligned with the first grid card. */
+private val ContentStart = 44.dp
 
 private fun tabIcon(tab: HomeTab): ImageVector = when (tab) {
     HomeTab.RECOMMEND -> Icons.Filled.ThumbUp
@@ -380,22 +382,15 @@ private fun HomeLayout(
     // The whole navigation lives on the left rail: search, then every home tab
     // in display order, then source management. One requester per entry, with
     // wrap-around up/down, keeps the D-pad cycling inside the rail.
-    val railEntries = remember(state.history.size, state.sources.size) {
+    // No count badges on 历史 / 源管理: the numbers changed on every history
+    // update and made the rail look noisy. The rail itself is static.
+    val railEntries = remember {
         buildList {
             add(RailEntry("搜索", icon = Icons.Filled.Search, action = 0))
             tabs.forEach { tab ->
-                add(
-                    RailEntry(
-                        label = tab.label,
-                        badge = if (tab == HomeTab.HISTORY && state.history.isNotEmpty()) {
-                            "${state.history.size}"
-                        } else null,
-                        icon = tabIcon(tab),
-                        tab = tab
-                    )
-                )
+                add(RailEntry(label = tab.label, icon = tabIcon(tab), tab = tab))
             }
-            add(RailEntry("源管理", badge = "${state.sources.size}", icon = Icons.Filled.Storage, action = 1))
+            add(RailEntry("源管理", icon = Icons.Filled.Storage, action = 1))
         }
     }
     val railRequesters = remember { List(railEntries.size) { FocusRequester() } }
@@ -416,16 +411,19 @@ private fun HomeLayout(
     ) {
         Column(
             modifier = Modifier
-                .width(178.dp)
-                .verticalScroll(railScroll),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+                // 160 dp = 152 dp rail + 8 dp slack for the 1.05x focus scale,
+                // so the enlarged nav tile is not clipped by the scroll view.
+                .width(160.dp)
+                .verticalScroll(railScroll)
+                .padding(end = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             Text(
                 "LibreTV",
                 color = TvColors.OnSurface,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(start = 14.dp, bottom = 12.dp)
+                modifier = Modifier.padding(start = 12.dp, bottom = 12.dp)
             )
 
             railEntries.forEachIndexed { index, entry ->
@@ -457,13 +455,17 @@ private fun HomeLayout(
                     NavItem(
                         label = entry.label,
                         focused = focused,
-                        badge = entry.badge,
                         selected = entry.tab == state.homeTab,
                         icon = entry.icon
                     )
                 }
             }
         }
+
+        // Breathing room between the rail and the first grid column: a focused
+        // card grows ~9% in every direction, so it needs clear space on the
+        // left as well as above the first row.
+        Spacer(Modifier.width(14.dp))
 
         Column(modifier = Modifier.weight(1f).fillMaxSize()) {
             if (state.homeTab == HomeTab.HISTORY) {
@@ -550,10 +552,12 @@ private fun HomeFeedPage(
             columns = GridCells.Adaptive(150.dp),
             state = gridState,
             contentPadding = PaddingValues(
-                start = 40.dp, end = 40.dp, top = 8.dp, bottom = 40.dp
+                // 20 dp above the first row leaves room for the 1.09x focus
+                // scale; the older 8 dp clipped the top of focused posters.
+                start = ContentStart, end = 40.dp, top = 20.dp, bottom = 40.dp
             ),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(22.dp),
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
@@ -593,7 +597,7 @@ private fun FeedHeader(state: UiState) {
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 40.dp, end = 40.dp, top = 8.dp, bottom = 12.dp)
+            .padding(start = ContentStart, end = 40.dp, top = 8.dp, bottom = 12.dp)
     ) {
         Column(Modifier.weight(1f)) {
             Text(
@@ -635,7 +639,11 @@ private fun GenreStrip(
     onSelect: (String) -> Unit
 ) {
     LazyRow(
-        contentPadding = PaddingValues(start = 40.dp, end = 40.dp),
+        // Vertical padding keeps focused chips (1.06x scale) inside the row and
+        // adds a gap between the chip strip and the first poster row.
+        contentPadding = PaddingValues(
+            start = ContentStart, end = 40.dp, top = 8.dp, bottom = 10.dp
+        ),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -697,7 +705,7 @@ private fun FeedCenteredLoading(text: String) {
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 40.dp, top = 22.dp, bottom = 10.dp)
+            .padding(start = ContentStart, top = 22.dp, bottom = 10.dp)
     ) {
         CircularProgressIndicator(
             color = TvColors.Primary,
