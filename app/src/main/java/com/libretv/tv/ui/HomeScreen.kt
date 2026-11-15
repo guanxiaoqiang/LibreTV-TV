@@ -27,7 +27,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -73,9 +72,8 @@ fun FocusableTile(
 /**
  * Navigation entry on the left rail.
  *
- * Focus is deliberately loud: a gradient wash, an accent bar on the left edge,
- * a filled icon chip, larger white text and a double ring. A colour-only focus
- * is invisible from a sofa.
+ * Focus is a single focus box: a filled background plus one accent ring. No
+ * accent bars or underlines — the box alone is loud enough on a TV.
  */
 @Composable
 fun NavItem(
@@ -83,13 +81,14 @@ fun NavItem(
     focused: Boolean,
     modifier: Modifier = Modifier,
     badge: String? = null,
+    selected: Boolean = false,
     icon: ImageVector = Icons.Filled.PlayArrow
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RoundedCornerShape(10.dp)
     Box(
         modifier = modifier
-            .width(230.dp)
-            .height(62.dp)
+            .width(178.dp)
+            .height(44.dp)
             .clip(shape)
             .background(if (focused) TvColors.SurfaceHigh else Color.Transparent)
             .border(
@@ -98,35 +97,16 @@ fun NavItem(
                 shape = shape
             )
     ) {
-        if (focused) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(Color(0x66ED93B1), Color(0x18ED93B1), Color.Transparent)
-                        )
-                    )
-            )
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .width(5.dp)
-                    .height(34.dp)
-                    .background(TvColors.Primary, RoundedCornerShape(3.dp))
-            )
-        }
-
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(start = 24.dp, end = 18.dp),
+                .padding(start = 14.dp, end = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .size(26.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(if (focused) TvColors.Primary else TvColors.Surface),
                 contentAlignment = Alignment.Center
             ) {
@@ -134,28 +114,32 @@ fun NavItem(
                     imageVector = icon,
                     contentDescription = null,
                     tint = if (focused) Color(0xFF14181D) else TvColors.OnSurfaceMuted,
-                    modifier = Modifier.size(19.dp)
+                    modifier = Modifier.size(15.dp)
                 )
             }
-            Spacer(Modifier.width(14.dp))
+            Spacer(Modifier.width(10.dp))
             Text(
                 text = label,
-                color = if (focused) Color.White else TvColors.OnSurfaceMuted,
-                fontSize = if (focused) 20.sp else 18.sp,
-                fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
+                color = when {
+                    focused -> Color.White
+                    selected -> TvColors.Primary
+                    else -> TvColors.OnSurfaceMuted
+                },
+                fontSize = if (focused) 15.sp else 14.sp,
+                fontWeight = if (focused || selected) FontWeight.Bold else FontWeight.Normal,
                 modifier = Modifier.weight(1f)
             )
             if (badge != null) {
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(9.dp))
+                        .clip(RoundedCornerShape(8.dp))
                         .background(if (focused) Color(0x33FFFFFF) else TvColors.Surface)
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                        .padding(horizontal = 7.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = badge,
                         color = if (focused) Color.White else TvColors.OnSurfaceMuted,
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }

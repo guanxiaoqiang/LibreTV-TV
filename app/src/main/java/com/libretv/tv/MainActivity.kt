@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,9 +39,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Animation
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.OndemandVideo
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Theaters
+import androidx.compose.material.icons.filled.ThumbUp
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Text
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -48,20 +56,18 @@ import com.libretv.tv.data.AdFilterSettings
 import com.libretv.tv.data.CmsClient
 import com.libretv.tv.data.DoubanSubject
 import com.libretv.tv.data.PlayRequest
-import com.libretv.tv.data.SearchResult
+import com.libretv.tv.data.TitleGroup
 import com.libretv.tv.data.SourceConfig
 import com.libretv.tv.data.SourceRepository
 import com.libretv.tv.data.VodItem
 import com.libretv.tv.data.WatchRecord
 import com.libretv.tv.ui.CategoryHint
 import com.libretv.tv.ui.CategoryShelf
-import com.libretv.tv.ui.CategoryTabRow
 import com.libretv.tv.ui.DetailScreen
 import com.libretv.tv.ui.DoubanLoadingHint
 import com.libretv.tv.ui.DoubanShelf
 import com.libretv.tv.ui.FocusableTile
 import com.libretv.tv.ui.HistoryPage
-import com.libretv.tv.ui.HistoryShelf
 import com.libretv.tv.ui.HomeTab
 import com.libretv.tv.ui.NavItem
 import com.libretv.tv.ui.PlayerScreen
@@ -94,12 +100,28 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class NavEntry(
+/**
+ * One entry of the left rail. Either a tab (`tab != null`) or an action entry
+ * (`action` 0 = search screen, 1 = sources screen).
+ */
+private data class RailEntry(
     val label: String,
     val badge: String? = null,
-    val action: Int,
-    val icon: ImageVector
+    val icon: ImageVector,
+    val tab: HomeTab? = null,
+    val action: Int? = null
 )
+
+private fun tabIcon(tab: HomeTab): ImageVector = when (tab) {
+    HomeTab.RECOMMEND -> Icons.Filled.ThumbUp
+    HomeTab.HISTORY -> Icons.Filled.History
+    HomeTab.MOVIE -> Icons.Filled.Movie
+    HomeTab.SERIES -> Icons.Filled.Tv
+    HomeTab.VARIETY -> Icons.Filled.Theaters
+    HomeTab.ANIME -> Icons.Filled.Animation
+    HomeTab.DOCUMENTARY -> Icons.Filled.Explore
+    HomeTab.SHORT -> Icons.Filled.OndemandVideo
+}
 
 @Composable
 fun TvApp(vm: TvViewModel = viewModel()) {
@@ -169,10 +191,9 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             state = state,
             onSearch = { vm.navigate(Screen.SEARCH) },
             onSources = { vm.navigate(Screen.SOURCES) },
-            onHistory = { vm.setHomeTab(HomeTab.HISTORY) },
             onSelectTab = { vm.setHomeTab(it) },
             onPickDouban = { vm.searchDoubanTitle(it) },
-            onPickCategoryItem = { vm.openDetail(it, Screen.HOME) },
+            onPickGroup = { vm.openGroupOrDetail(it, Screen.HOME) },
             onResume = resumeRecord,
             onDeleteHistory = { vm.deleteHistory(it) },
             onClearHistory = { vm.clearHistory() }
@@ -192,7 +213,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             keyword = state.searchedKeyword,
             results = state.results,
             searching = state.searching,
-            onOpenGroup = { vm.openGroup(it) },
+            onOpenGroup = { vm.openGroupOrDetail(it, Screen.RESULT) },
             onBack = { vm.back() }
         )
 
@@ -324,29 +345,48 @@ fun TvApp(vm: TvViewModel = viewModel()) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun HomeLayout(
     state: UiState,
     onSearch: () -> Unit,
     onSources: () -> Unit,
-    onHistory: () -> Unit,
     onSelectTab: (HomeTab) -> Unit,
     onPickDouban: (DoubanSubject) -> Unit,
-    onPickCategoryItem: (SearchResult) -> Unit,
+    onPickGroup: (TitleGroup) -> Unit,
     onResume: (WatchRecord) -> Unit,
     onDeleteHistory: (String) -> Unit,
     onClearHistory: () -> Unit
 ) {
     val tabs = remember { HomeTab.entries.toList() }
-    // Three rail entries and one requester per tab. The explicit chain is what
-    // keeps a D-pad from getting stranded between the left rail and the wide
-    // content area, which have very little geometric overlap.
-    val navRequesters = remember { List(3) { FocusRequester() } }
-    val tabRequesters = remember { List(tabs.size) { FocusRequester() } }
+    // The whole navigation lives on the left rail now: search, then every home
+    // tab in display order, then source management. One requester per entry,
+    // with wrap-around up/down, keeps the D-pad cycling inside the rail.
+    val railEntries = remember(state.history.size, state.sources.size) {
+        buildList {
+            add(RailEntry("搜索", icon = Icons.Filled.Search, action = 0))
+            tabs.forEach { tab ->
+                add(
+                    RailEntry(
+                        label = tab.label,
+                        badge = if (tab == HomeTab.HISTORY && state.history.isNotEmpty()) {
+                            "${state.history.size}"
+                        } else null,
+                        icon = tabIcon(tab),
+                        tab = tab
+                    )
+                )
+            }
+            add(RailEntry("源管理", badge = "${state.sources.size}", icon = Icons.Filled.Storage, action = 1))
+        }
+    }
+    val railRequesters = remember { List(railEntries.size) { FocusRequester() } }
+    val railBringers = remember { List(railEntries.size) { BringIntoViewRequester() } }
+    val railScroll = rememberScrollState()
     val scrollState = rememberScrollState()
 
     LaunchedEffect(Unit) {
-        navRequesters[0].requestFocus()
+        railRequesters[0].requestFocus()
     }
     // A category switch should always start at the top of its own shelves.
     LaunchedEffect(state.homeTab) {
@@ -357,57 +397,57 @@ private fun HomeLayout(
         modifier = Modifier
             .fillMaxSize()
             // Keep the left rail clear of the TV overscan area. Without this
-            // start inset the focused nav tile (and its 5% scale-up glow) sits
+            // start inset the focused nav tile (and its scale-up glow) sits
             // flush against the physical screen edge.
             .padding(start = 24.dp, top = 22.dp, bottom = 20.dp)
     ) {
         Column(
-            modifier = Modifier.width(230.dp),
+            modifier = Modifier
+                .width(178.dp)
+                .verticalScroll(railScroll),
             verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)
         ) {
             Text(
                 "LibreTV",
                 color = TvColors.OnSurface,
-                fontSize = 28.sp,
+                fontSize = 24.sp,
                 fontWeight = FontWeight.Medium,
-                // Lines up with the icon chip inside NavItem (24.dp inner inset
+                // Lines up with the icon chip inside NavItem (14.dp inner inset
                 // on top of the 24.dp rail inset).
-                modifier = Modifier.padding(start = 24.dp, bottom = 14.dp)
+                modifier = Modifier.padding(start = 14.dp, bottom = 12.dp)
             )
 
-            val entries = listOf(
-                NavEntry("搜索影片", null, 0, Icons.Filled.Search),
-                NavEntry("源管理", "${state.sources.size}", 1, Icons.Filled.Storage),
-                NavEntry("历史记录", "${state.history.size}", 2, Icons.Filled.History)
-            )
-
-            entries.forEachIndexed { index, entry ->
+            railEntries.forEachIndexed { index, entry ->
                 FocusableTile(
                     onClick = {
-                        when (entry.action) {
-                            0 -> onSearch()
-                            1 -> onSources()
-                            else -> onHistory()
+                        when {
+                            entry.action == 0 -> onSearch()
+                            entry.action == 1 -> onSources()
+                            entry.tab != null -> onSelectTab(entry.tab)
                         }
                     },
                     scaleWhenFocused = 1.05f,
                     modifier = Modifier
-                        .focusRequester(navRequesters[index])
+                        .focusRequester(railRequesters[index])
                         .focusProperties {
-                            up = navRequesters[(index + 2) % entries.size]
-                            down = navRequesters[(index + 1) % entries.size]
-                            // Returning from the rail lands on the tab that is
-                            // actually showing, so "focus = select" does not
-                            // silently jump the viewer back to 推荐.
-                            right = tabRequesters[
-                                state.homeTab.ordinal.coerceIn(0, tabs.lastIndex)
-                            ]
+                            up = railRequesters[(index - 1 + railEntries.size) % railEntries.size]
+                            down = railRequesters[(index + 1) % railEntries.size]
                         }
                 ) { focused ->
+                    if (focused) {
+                        // Keep the focused entry visible while scrolling the
+                        // rail; tab entries select on focus, matching the old
+                        // top tab strip behaviour.
+                        LaunchedEffect(entry.tab) {
+                            railBringers[index].bringIntoView()
+                            entry.tab?.let(onSelectTab)
+                        }
+                    }
                     NavItem(
                         label = entry.label,
                         focused = focused,
                         badge = entry.badge,
+                        selected = entry.tab == state.homeTab,
                         icon = entry.icon
                     )
                 }
@@ -415,15 +455,6 @@ private fun HomeLayout(
         }
 
         Column(modifier = Modifier.weight(1f).fillMaxSize()) {
-            CategoryTabRow(
-                tabs = tabs,
-                selected = state.homeTab,
-                requesters = tabRequesters,
-                railRequester = navRequesters[0],
-                onSelect = onSelectTab,
-                onSearch = onSearch
-            )
-
             if (state.homeTab == HomeTab.HISTORY) {
                 HistoryPage(
                     records = state.history,
@@ -443,9 +474,7 @@ private fun HomeLayout(
                         HeroBlock(sourceCount = state.sources.size, onSearch = onSearch)
                         Spacer(Modifier.height(12.dp))
 
-                        HistoryShelf(records = state.history.take(12), onResume = onResume)
-                        if (state.history.isNotEmpty()) Spacer(Modifier.height(18.dp))
-
+                        // Watch history is deliberately confined to the 历史 tab.
                         if (state.doubanLoading && state.doubanRows.isEmpty()) {
                             DoubanLoadingHint()
                         }
@@ -463,9 +492,8 @@ private fun HomeLayout(
                     } else {
                         CategoryTabContent(
                             state = state,
-                            onPickCategoryItem = onPickCategoryItem,
-                            onPickDouban = onPickDouban,
-                            onResume = onResume
+                            onPickGroup = onPickGroup,
+                            onPickDouban = onPickDouban
                         )
                     }
                 }
@@ -518,37 +546,48 @@ private fun HeroBlock(sourceCount: Int, onSearch: () -> Unit) {
 @Composable
 private fun CategoryTabContent(
     state: UiState,
-    onPickCategoryItem: (SearchResult) -> Unit,
-    onPickDouban: (DoubanSubject) -> Unit,
-    onResume: (WatchRecord) -> Unit
+    onPickGroup: (TitleGroup) -> Unit,
+    onPickDouban: (DoubanSubject) -> Unit
 ) {
-    val sourceName = state.categorySource?.name ?: "内置采集源"
+    val sourceCount = state.categorySourceCount.takeIf { it > 0 } ?: state.sources.size
     Row(
         modifier = Modifier.padding(start = 40.dp, end = 40.dp, top = 10.dp, bottom = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            "${state.homeTab.label} · 分类片单",
+            "${state.homeTab.label} · 全源聚合",
             color = TvColors.OnSurface,
             fontSize = 22.sp,
             fontWeight = FontWeight.Medium
         )
         Spacer(Modifier.width(14.dp))
-        Text("来自 $sourceName", color = TvColors.OnSurfaceMuted, fontSize = 12.sp)
+        Text(
+            if (state.categoryLoading && state.categoryTitles.isEmpty()) {
+                "正在汇总 $sourceCount 个采集源…"
+            } else {
+                "已整合 $sourceCount 个源 · ${state.categoryTotalItems} 条资源 → " +
+                    "${state.categoryTitles.size} 部影片（同名已合并）"
+            },
+            color = TvColors.OnSurfaceMuted,
+            fontSize = 12.sp
+        )
     }
 
-    // Continue-watching stays one D-pad press away on every category tab.
-    if (state.history.isNotEmpty()) {
-        HistoryShelf(records = state.history.take(6), onResume = onResume)
-        Spacer(Modifier.height(18.dp))
+    // Watch history lives only on the 历史 tab now.
+    if (state.categoryLoading && state.categoryTitles.isEmpty()) {
+        CategoryHint(
+            "正在从所有源拉取${state.homeTab.label}片单并合并同名资源… " +
+                "(${state.categoryDoneTargets}/${state.categoryTotalTargets})"
+        )
     }
 
-    if (state.categoryLoading) {
-        CategoryHint("正在从 $sourceName 加载${state.homeTab.label}片单…")
-    }
-
-    state.categoryRows.forEach { row ->
-        CategoryShelf(row = row, onPick = onPickCategoryItem)
+    if (state.categoryTitles.isNotEmpty()) {
+        CategoryShelf(
+            label = "${state.homeTab.label} · ${state.categoryTitles.size} 部 · " +
+                "单源直达播放页 / 多源进入选源",
+            groups = state.categoryTitles,
+            onPick = onPickGroup
+        )
         Spacer(Modifier.height(18.dp))
     }
 
@@ -562,7 +601,7 @@ private fun CategoryTabContent(
     }
 
     if (!state.categoryLoading &&
-        state.categoryRows.isEmpty() &&
+        state.categoryTitles.isEmpty() &&
         state.tabDoubanRows.isEmpty()
     ) {
         CategoryHint("该分类暂时没有片单，可切换到「推荐」或使用遥控器搜索")

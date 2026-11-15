@@ -6,6 +6,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 
 /**
@@ -116,19 +117,52 @@ class SourceRepository(private val context: Context) {
             ?.let { (source, classes) -> CategoryCatalog(source, classes) }
     }
 
-    /** Load one page of a category shelf, tagged with the source it came from. */
+    /**
+     * Read the category tree of *every* bundled source, in parallel.
+     *
+     * Category ids are local to each collector, so a tab can only be fanned out
+     * to all sources after each source's own name -> id mapping is known. The
+     * result is cached by the view model; sources without a usable tree are
+     * skipped instead of blocking the whole tab.
+     */
+    suspend fun allCategoryCatalogs(
+        sources: List<SourceConfig>,
+        client: CmsClient
+    ): List<CategoryCatalog> = coroutineScope {
+        sources.map { source ->
+            async(Dispatchers.IO) {
+                // A dead collector can otherwise hold the whole fan-out for
+                // three consecutive 18 s call timeouts. Cap one tree probe.
+                val classes = try {
+                    withTimeoutOrNull(8_000L) { client.categories(source.url) }.orEmpty()
+                } catch (e: Exception) {
+                    emptyList()
+                }
+                if (classes.size >= 4 && classes.any { it.parentId == 0 }) {
+                    CategoryCatalog(source, classes)
+                } else null
+            }
+        }.awaitAll().filterNotNull()
+    }
+
+    /**
+     * Load one page of a category shelf, tagged with the source it came from
+     * and the round-trip time. The latency feeds the same quality/latency
+     * badges used on the search results grid.
+     */
     suspend fun categoryShelf(
         source: SourceConfig,
         typeId: Int,
         client: CmsClient
     ): List<SearchResult> = withContext(Dispatchers.IO) {
-        try {
-            client.categoryItems(source.url, typeId).map {
-                SearchResult(source.name, it, source.url, 0L)
-            }
+        val start = System.currentTimeMillis()
+        val items = try {
+            client.categoryItems(source.url, typeId)
         } catch (e: Exception) {
             emptyList()
         }
+        val latency = System.currentTimeMillis() - start
+        items.map { SearchResult(source.name, it, source.url, latency) }
     }
 
     /**

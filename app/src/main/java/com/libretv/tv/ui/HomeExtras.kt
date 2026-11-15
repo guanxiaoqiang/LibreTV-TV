@@ -19,19 +19,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusProperties
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -40,8 +32,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.libretv.tv.data.SearchResult
+import com.libretv.tv.data.TitleGroup
 import com.libretv.tv.data.WatchRecord
+import com.libretv.tv.data.formatLatency
 
 /** Card size shared by the shelf and the full history grid. */
 private val HISTORY_CARD_WIDTH = 260.dp
@@ -53,139 +46,6 @@ private fun formatWatchTime(ms: Long): String {
     val m = (total % 3600) / 60
     val s = total % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
-}
-
-/**
- * The fixed tab strip at the top of the home screen.
- *
- * Two TV-specific behaviours live here:
- *
- *  - Moving the focus onto a tab switches to it immediately. A select press is
- *    no longer required, which is how Android TV category rails are expected
- *    to behave. Touch taps still work through the tile's click path.
- *  - A search chip is pinned to the right of the strip at all times, so the
- *    viewer can reach search without walking back to the left rail.
- *
- * `down` is left to spatial focus so the D-pad can walk into the shelves.
- */
-@Composable
-fun CategoryTabRow(
-    tabs: List<HomeTab>,
-    selected: HomeTab,
-    requesters: List<FocusRequester>,
-    railRequester: FocusRequester,
-    onSelect: (HomeTab) -> Unit,
-    onSearch: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val searchRequester = remember { FocusRequester() }
-    val lastIndex = tabs.lastIndex
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(start = 36.dp, end = 36.dp, top = 6.dp, bottom = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        tabs.forEachIndexed { index, tab ->
-            FocusableTile(
-                onClick = { onSelect(tab) },
-                scaleWhenFocused = 1.07f,
-                modifier = Modifier
-                    .focusRequester(requesters[index])
-                    .focusProperties {
-                        previous = requesters[(index - 1 + tabs.size) % tabs.size]
-                        next = if (index == lastIndex) searchRequester
-                        else requesters[(index + 1) % tabs.size]
-                        left = if (index == 0) railRequester
-                        else requesters[(index - 1 + tabs.size) % tabs.size]
-                        right = if (index == lastIndex) searchRequester
-                        else requesters[(index + 1) % tabs.size]
-                    }
-            ) { focused ->
-                // Focus alone is the selection on a TV. The effect is keyed on
-                // `focused` so a recomposition caused by the tab switch itself
-                // cannot start a second network load.
-                LaunchedEffect(focused) {
-                    if (focused) onSelect(tab)
-                }
-                val active = tab == selected
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(
-                            when {
-                                focused -> TvColors.Primary
-                                active -> TvColors.SurfaceHigh
-                                else -> TvColors.Surface
-                            }
-                        )
-                        .tvFocusable(focused, RoundedCornerShape(20.dp))
-                        .padding(horizontal = 17.dp, vertical = 9.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = tab.label,
-                        color = when {
-                            focused -> Color(0xFF14181D)
-                            active -> TvColors.Primary
-                            else -> TvColors.OnSurfaceMuted
-                        },
-                        fontSize = 14.sp,
-                        fontWeight = if (active || focused) FontWeight.Bold else FontWeight.Normal
-                    )
-                    if (active && !focused) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .width(22.dp)
-                                .height(3.dp)
-                                .background(TvColors.Primary, RoundedCornerShape(2.dp))
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.weight(1f))
-
-        FocusableTile(
-            onClick = onSearch,
-            scaleWhenFocused = 1.08f,
-            modifier = Modifier
-                .focusRequester(searchRequester)
-                .focusProperties {
-                    left = requesters[lastIndex]
-                    previous = requesters[lastIndex]
-                    right = requesters.first()
-                    next = requesters.first()
-                }
-        ) { focused ->
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (focused) TvColors.Primary else TvColors.SurfaceHigh)
-                    .tvFocusable(focused, RoundedCornerShape(20.dp))
-                    .padding(horizontal = 16.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Search,
-                    contentDescription = null,
-                    tint = if (focused) Color(0xFF14181D) else TvColors.Primary,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(Modifier.width(7.dp))
-                Text(
-                    text = "搜索",
-                    color = if (focused) Color(0xFF14181D) else TvColors.OnSurface,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-    }
 }
 
 /** Small heading with the accent bar, shared by all shelves. */
@@ -210,27 +70,35 @@ fun ShelfTitle(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** One shelf of real, playable titles from the collector's category tree. */
+/**
+ * One shelf of titles aggregated across every source. A card represents one
+ * film, no matter how many collectors carry it; the badge shows the offer count
+ * and the footer shows the best quality / quickest response.
+ */
 @Composable
 fun CategoryShelf(
-    row: CategoryRow,
-    onPick: (SearchResult) -> Unit,
+    label: String,
+    groups: List<TitleGroup>,
+    onPick: (TitleGroup) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    if (groups.isEmpty()) return
     Column(modifier = modifier.fillMaxWidth()) {
-        ShelfTitle("${row.label} · ${row.items.size} 部")
+        ShelfTitle(label)
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = PaddingValues(start = 40.dp, end = 40.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            lazyItems(row.items, key = { "${row.label}-${it.sourceName}-${it.item.vodId}" }) { result ->
-                FocusableTile(onClick = { onPick(result) }) { focused ->
+            lazyItems(groups, key = { it.key }) { group ->
+                FocusableTile(onClick = { onPick(group) }) { focused ->
                     PosterCard(
-                        title = result.item.vodName,
-                        poster = result.item.vodPic,
-                        remarks = result.item.vodRemarks,
-                        sourceName = result.sourceName,
+                        title = group.title,
+                        poster = group.poster,
+                        remarks = group.year.ifBlank { group.typeName },
+                        sourceName = "",
+                        cornerBadge = "${group.playableCount} 源",
+                        footerNote = "${group.bestQuality.short} · ${formatLatency(group.fastestMs)}",
                         focused = focused
                     )
                 }

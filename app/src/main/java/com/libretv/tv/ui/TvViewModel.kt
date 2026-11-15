@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.libretv.tv.data.CategoryCatalog
+import com.libretv.tv.data.aggregate
 import com.libretv.tv.data.CmsClient
 import com.libretv.tv.data.DetailBundle
 import com.libretv.tv.data.DoubanClient
@@ -22,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,9 +33,9 @@ import kotlinx.coroutines.launch
 enum class Screen { HOME, SEARCH, RESULT, SOURCE_PICKER, DETAIL, PLAYER, SOURCES }
 
 /**
- * Home screen tabs.
+ * Home screen tabs, in left-rail display order.
  *
- * The first ones map onto the collector's own category tree; RECOMMEND keeps
+ * The category tabs map onto the collector's own category tree; RECOMMEND keeps
  * the Douban discovery shelves and HISTORY shows the local continue-watching
  * list. doubanType / doubanTags feed a fallback shelf so a tab never ends up
  * completely blank when a collector is unreachable.
@@ -44,13 +46,13 @@ enum class HomeTab(
     val doubanTags: List<String>
 ) {
     RECOMMEND("推荐", "movie", emptyList()),
+    HISTORY("历史", "movie", emptyList()),
     MOVIE("电影", "movie", listOf("热门", "高分", "喜剧")),
     SERIES("剧集", "tv", listOf("热门", "国产剧")),
     VARIETY("综艺", "tv", listOf("综艺", "最新")),
     ANIME("动漫", "movie", listOf("动画", "高分")),
     DOCUMENTARY("纪录片", "movie", listOf("纪录片", "高分")),
-    SHORT("短剧", "tv", listOf("最新")),
-    HISTORY("历史", "movie", emptyList())
+    SHORT("短剧", "tv", listOf("最新"))
 }
 
 data class UiState(
@@ -72,14 +74,22 @@ data class UiState(
     val doubanRows: List<DoubanRow> = emptyList(),
     val doubanLoading: Boolean = false,
     val homeTab: HomeTab = HomeTab.RECOMMEND,
+    /** Source that supplied the reference category tree (display only). */
     val categorySource: SourceConfig? = null,
-    val categoryGroups: Map<HomeTab, List<VodClass>> = emptyMap(),
-    val categoryRows: List<CategoryRow> = emptyList(),
+    /** All-source fan-out: one card per title, no matter how many APIs carry it. */
+    val categoryCatalogReady: Boolean = false,
+    val categorySourceCount: Int = 0,
+    val categoryTitles: List<TitleGroup> = emptyList(),
+    val categoryTotalItems: Int = 0,
+    val categoryDoneTargets: Int = 0,
+    val categoryTotalTargets: Int = 0,
     val categoryLoading: Boolean = false,
     val tabDoubanRows: List<DoubanRow> = emptyList(),
     val history: List<WatchRecord> = emptyList(),
     /** The title whose sources are being compared, and their async probes. */
     val selectedGroup: TitleGroup? = null,
+    /** Where the source picker was opened from, so BACK returns correctly. */
+    val pickerFrom: Screen = Screen.RESULT,
     val offerProbes: Map<String, OfferProbe> = emptyMap(),
     /** The source chosen last, shown as a badge on the detail page. */
     val activeOffer: SourceOffer? = null
@@ -90,12 +100,6 @@ data class DoubanRow(
     val tag: String,
     val label: String,
     val subjects: List<DoubanSubject> = emptyList()
-)
-
-/** One shelf of a category tab: a sub-category name plus its playable titles. */
-data class CategoryRow(
-    val label: String,
-    val items: List<SearchResult> = emptyList()
 )
 
 /**
@@ -175,9 +179,14 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     private var searchJob: Job? = null
     private var categoryJob: Job? = null
     private var tabDoubanJob: Job? = null
+    /** Category trees of every usable source, cached so tab switches are cheap. */
+    private var allCatalogs: List<CategoryCatalog> = emptyList()
 
     /** pinyin-initial -> Chinese title, so a TV remote alone can reach a title. */
     private var titleIndex: Map<String, String> = emptyMap()
+
+    private fun needsCategory(tab: HomeTab): Boolean =
+        tab != HomeTab.RECOMMEND && tab != HomeTab.HISTORY
 
     init {
         viewModelScope.launch {
@@ -185,20 +194,17 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             titleIndex = repo.loadTitleIndex()
             _state.value = _state.value.copy(sources = loaded)
 
-            val catalog: CategoryCatalog? = repo.loadCategoryCatalog(loaded, client)
-            if (catalog != null) {
-                _state.value = _state.value.copy(
-                    categorySource = catalog.source,
-                    categoryGroups = classify(catalog.classes)
-                )
-                // A tab may have been selected before the catalog arrived.
-                val tab = _state.value.homeTab
-                if (tab != HomeTab.RECOMMEND && tab != HomeTab.HISTORY) {
-                    loadCategoryTab(tab)
-                }
-            } else {
-                _state.value = _state.value.copy(categoryLoading = false)
-            }
+            // Every collector numbers its categories differently, so resolve
+            // each source's own name -> id tree once, up front.
+            allCatalogs = repo.allCategoryCatalogs(loaded, client)
+            _state.value = _state.value.copy(
+                categorySource = allCatalogs.firstOrNull()?.source,
+                categorySourceCount = allCatalogs.size,
+                categoryCatalogReady = true
+            )
+            // A tab may have been selected before the catalogs arrived.
+            val tab = _state.value.homeTab
+            if (needsCategory(tab)) loadCategoryTab(tab)
         }
         viewModelScope.launch {
             historyStore.records.collect { records ->
@@ -215,38 +221,99 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         // focus event and a touch tap within a few milliseconds. Bail out on a
         // no-op change instead of dropping the freshly loaded shelves twice.
         if (_state.value.homeTab == tab) return
-        val needsCatalog = tab != HomeTab.RECOMMEND && tab != HomeTab.HISTORY
-        val catalogReady = _state.value.categorySource != null
+        val needs = needsCategory(tab)
+        categoryJob?.cancel()
         _state.value = _state.value.copy(
             homeTab = tab,
-            categoryRows = emptyList(),
-            tabDoubanRows = emptyList(),
-            categoryLoading = needsCatalog && !catalogReady
+            categoryTitles = emptyList(),
+            categoryTotalItems = 0,
+            categoryDoneTargets = 0,
+            categoryTotalTargets = 0,
+            categoryLoading = needs,
+            tabDoubanRows = emptyList()
         )
-        if (!needsCatalog) return
+        if (!needs) return
         loadTabDouban(tab)
-        if (catalogReady) loadCategoryTab(tab)
+        if (_state.value.categoryCatalogReady) loadCategoryTab(tab)
     }
 
-    /** Load the collector shelves for one tab, keeping the configured order. */
+    /**
+     * Fan a tab out to *every* source that exposes a matching category and fold
+     * all returned titles into one aggregated shelf.
+     *
+     * Each source answers into a channel, so the shelf fills in progressively
+     * instead of waiting for the slowest collector. Every refresh re-aggregates
+     * the accumulated list, which is what merges one film seen on ten APIs into
+     * a single card carrying ten offers.
+     */
     private fun loadCategoryTab(tab: HomeTab) {
-        val source = _state.value.categorySource ?: return
-        val classes = _state.value.categoryGroups[tab].orEmpty()
         categoryJob?.cancel()
-        if (classes.isEmpty()) {
-            _state.value = _state.value.copy(categoryRows = emptyList(), categoryLoading = false)
-            return
-        }
-        _state.value = _state.value.copy(categoryRows = emptyList(), categoryLoading = true)
+        // Category ids are local to a source: map the tab onto each source's own
+        // tree and keep at most two sub-categories per source to bound the
+        // number of requests (30 sources x 2 pages).
+        val targets = allCatalogs.flatMap { catalog ->
+            classify(catalog.classes)[tab].orEmpty().take(2).map { c ->
+                catalog.source to c.typeId
+            }
+        }.distinctBy { (source, typeId) -> "${source.url}|$typeId" }
+
+        _state.value = _state.value.copy(
+            categoryTitles = emptyList(),
+            categoryTotalItems = 0,
+            categoryDoneTargets = 0,
+            categoryTotalTargets = targets.size,
+            categoryLoading = targets.isNotEmpty()
+        )
+        if (targets.isEmpty()) return
+
         categoryJob = viewModelScope.launch {
-            val rows = coroutineScope {
-                classes.map { c ->
-                    async(Dispatchers.IO) {
-                        CategoryRow(c.typeName, repo.categoryShelf(source, c.typeId, client))
+            val channel = Channel<List<SearchResult>>(Channel.UNLIMITED)
+            val jobs = targets.map { (source, typeId) ->
+                async(Dispatchers.IO) {
+                    val part = try {
+                        repo.categoryShelf(source, typeId, client)
+                    } catch (e: Exception) {
+                        emptyList()
                     }
-                }.awaitAll()
-            }.filter { it.items.isNotEmpty() }
-            _state.value = _state.value.copy(categoryRows = rows, categoryLoading = false)
+                    channel.send(part)
+                }
+            }
+            launch { jobs.awaitAll(); channel.close() }
+
+            val collected = mutableListOf<SearchResult>()
+            // The same vod id can appear in two sub-categories of one source;
+            // count it once so the "N 源" badge reflects real distinct copies.
+            val seen = mutableSetOf<String>()
+            var done = 0
+            for (part in channel) {
+                if (_state.value.homeTab != tab) {
+                    jobs.forEach { it.cancel() }
+                    return@launch
+                }
+                collected.addAll(
+                    part.filter { seen.add("${it.sourceUrl}|${it.item.vodId}") }
+                )
+                done++
+                val groups = aggregate(collected)
+                    .sortedWith(
+                        compareByDescending<TitleGroup> { it.offers.size }
+                            .thenByDescending { it.bestQuality.rank }
+                            .thenBy { if (it.fastestMs > 0L) it.fastestMs else Long.MAX_VALUE }
+                    )
+                    .take(60)
+                _state.value = _state.value.copy(
+                    categoryTitles = groups,
+                    categoryTotalItems = collected.size,
+                    categoryDoneTargets = done,
+                    categoryLoading = false
+                )
+            }
+            if (_state.value.homeTab == tab) {
+                _state.value = _state.value.copy(
+                    categoryDoneTargets = targets.size,
+                    categoryLoading = false
+                )
+            }
         }
     }
 
@@ -369,7 +436,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = when (s.screen) {
             Screen.PLAYER -> s.copy(screen = Screen.DETAIL)
             Screen.DETAIL -> s.copy(screen = s.detailFrom)
-            Screen.SOURCE_PICKER -> s.copy(screen = Screen.RESULT)
+            Screen.SOURCE_PICKER -> s.copy(screen = s.pickerFrom)
             Screen.RESULT -> s.copy(screen = Screen.SEARCH)
             Screen.SEARCH -> s.copy(screen = Screen.HOME)
             Screen.SOURCES -> s.copy(screen = Screen.HOME)
@@ -488,10 +555,32 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
      * The picker shows the coarse (search) latency immediately and fills in the
      * line / episode count and stream first-byte time as the probes land.
      */
-    fun openGroup(group: TitleGroup) {
+    /**
+     * One card, two destinations: several playable sources open the comparison
+     * page, while a single-source title skips the extra step and goes straight
+     * to the detail / episode picker. [from] keeps BACK wired to the page that
+     * actually opened the card (home tab or search results).
+     */
+    fun openGroupOrDetail(group: TitleGroup, from: Screen = _state.value.screen) {
+        if (group.playableCount <= 1) {
+            val offer = group.offers.firstOrNull { !it.isTrailer }
+                ?: group.offers.firstOrNull() ?: return
+            _state.value = _state.value.copy(activeOffer = null, selectedGroup = null)
+            openDetail(
+                SearchResult(
+                    sourceName = offer.sourceName,
+                    item = offer.item,
+                    sourceUrl = offer.sourceUrl,
+                    latencyMs = offer.latencyMs
+                ),
+                from = from
+            )
+            return
+        }
         _state.value = _state.value.copy(
             screen = Screen.SOURCE_PICKER,
             selectedGroup = group,
+            pickerFrom = from,
             offerProbes = emptyMap(),
             error = null
         )
