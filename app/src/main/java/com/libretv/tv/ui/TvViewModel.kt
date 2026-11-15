@@ -13,6 +13,7 @@ import com.libretv.tv.data.OfferProbe
 import com.libretv.tv.data.PlayRequest
 import com.libretv.tv.data.SearchHistoryStore
 import com.libretv.tv.data.SearchResult
+import com.libretv.tv.data.SearchSuggestions
 import com.libretv.tv.data.SourceOffer
 import com.libretv.tv.data.TitleGroup
 import com.libretv.tv.data.SourceConfig
@@ -895,16 +896,19 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(t9Buffer = "", t9LastDigit = null, query = "")
     }
 
-    /** Titles whose pinyin initials start with what has been typed. */
+    /**
+     * Suggestions for the strip directly under the input field. The on-screen
+     * letters still resolve through the pinyin index; free text from the IME
+     * matches bundled titles and recent keywords as the viewer types.
+     */
     fun candidateTitles(): List<String> {
-        val lower = _state.value.t9Buffer.lowercase()
-        if (lower.isEmpty()) return emptyList()
-        return titleIndex.entries
-            .filter { (initials, _) -> initials.startsWith(lower) }
-            .sortedByDescending { it.key.length }
-            .map { it.value }
-            .distinct()
-            .take(8)
+        val s = _state.value
+        return SearchSuggestions.suggest(
+            titleIndex = titleIndex,
+            history = s.searchHistory,
+            initials = s.t9Buffer,
+            query = s.query
+        )
     }
 
     /** Use a candidate title directly as the search term. */

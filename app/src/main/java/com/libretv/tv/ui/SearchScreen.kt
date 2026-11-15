@@ -7,16 +7,14 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -57,12 +55,21 @@ private val keyboardRows = listOf(
     listOf("Z", "X", "C", "V", "B", "N", "M")
 )
 
+private const val MAX_SUGGESTIONS = 8
+private const val MAX_HISTORY_ROWS = 12
+
 /**
- * Search with three complementary input paths:
+ * Search page layout:
  *
- *  - the full QWERTY board (pinyin initials -> Chinese titles) for a remote,
- *  - a real focusable text field that pulls up the IME for Chinese / free text,
- *  - persisted recent keywords, one tap to search again.
+ * ```
+ *  [ focusable input field                                      ]
+ *  [ live suggestion strip, directly under the field           ]
+ *  [ QWERTY board + action keys ]   [ focusable search history  ]
+ * ```
+ *
+ * Three complementary input paths: the on-screen board (pinyin initials),
+ * a real text field with the IME for Chinese / free text, and one-tap recent
+ * keywords on the right. The suggestion strip reacts to both typing paths.
  *
  * While the text field holds focus every physical key is left to the IME; the
  * root key handler below would otherwise also fold letters into the pinyin
@@ -83,6 +90,9 @@ fun SearchScreen(
     onDeleteHistory: (String) -> Unit,
     onClearHistory: () -> Unit
 ) {
+    val suggestions = candidates.take(MAX_SUGGESTIONS)
+    val history = searchHistory.take(MAX_HISTORY_ROWS)
+
     // One requester per letter key plus one per action key.
     val letterCount = keyboardRows.sumOf { it.size }
     val requesters = remember { List(letterCount + 3) { FocusRequester() } }
@@ -90,6 +100,9 @@ fun SearchScreen(
     val clearRequester = requesters[letterCount + 1]
     val searchRequester = requesters[letterCount + 2]
     val inputRequester = remember { FocusRequester() }
+    val suggestionRequesters = remember { List(MAX_SUGGESTIONS) { FocusRequester() } }
+    val historyRequesters = remember { List(MAX_HISTORY_ROWS) { FocusRequester() } }
+    val clearHistoryRequester = remember { FocusRequester() }
 
     var inputFocused by remember { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -117,6 +130,15 @@ fun SearchScreen(
         map
     }
 
+    // Last key of each row: the entry point into the history column on RIGHT.
+    val lastColumnRequesters = remember {
+        var acc = 0
+        keyboardRows.map { row ->
+            acc += row.size
+            requesters[acc - 1]
+        }
+    }
+
     /** The letter directly below [ch], if the layout has one. */
     fun belowOf(ch: String): String? {
         val col = columnOf[ch] ?: return null
@@ -132,7 +154,7 @@ fun SearchScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(28.dp)
+            .padding(start = 32.dp, end = 32.dp, top = 24.dp, bottom = 20.dp)
             .onKeyEvent { event ->
                 if (inputFocused) return@onKeyEvent false
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
@@ -154,11 +176,11 @@ fun SearchScreen(
                         if (letter.isNotEmpty()) onInput(letter)
                         true
                     }
-                    // The number row is the fastest path on a TV remote: 1-9
-                    // pick the matching candidate directly, 0 submits.
+                    // The number row is the fastest path on a TV remote: 1-8
+                    // pick the matching suggestion directly, 0 submits.
                     in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9 -> {
                         val index = event.nativeKeyEvent.keyCode - KeyEvent.KEYCODE_1
-                        candidates.getOrNull(index)?.let { onPickCandidate(it) }
+                        suggestions.getOrNull(index)?.let { onPickCandidate(it) }
                         true
                     }
                     KeyEvent.KEYCODE_0 -> {
@@ -178,6 +200,15 @@ fun SearchScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(inputRequester)
+                .focusProperties {
+                    // DOWN always lands on the live suggestion strip when it has
+                    // chips; with an empty strip the board is the next target.
+                    this.down = if (suggestions.isNotEmpty()) {
+                        suggestionRequesters[0]
+                    } else {
+                        requesters[0]
+                    }
+                }
                 .onFocusChanged { inputFocused = it.isFocused },
             textStyle = TextStyle(
                 color = TvColors.OnSurface,
@@ -192,7 +223,7 @@ fun SearchScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(64.dp)
+                        .height(62.dp)
                         .clip(fieldShape)
                         .background(if (inputFocused) TvColors.SurfaceHigh else TvColors.Surface)
                         .border(
@@ -205,7 +236,7 @@ fun SearchScreen(
                 ) {
                     if (query.isEmpty()) {
                         Text(
-                            "上焦本框可拉起键盘直接输入；也可用下方全键盘选字母，拼音首字母可搜中文片名",
+                            "上焦本框可拉起键盘直接输入；也可用左侧全键盘选字母，拼音首字母可搜中文片名",
                             color = TvColors.OnSurfaceMuted,
                             fontSize = 14.sp,
                             maxLines = 1
@@ -216,9 +247,202 @@ fun SearchScreen(
             }
         )
 
-        Spacer(Modifier.height(12.dp))
+        // Live suggestions sit immediately below the field, above both columns.
+        Spacer(Modifier.height(8.dp))
+        SuggestionStrip(
+            suggestions = suggestions,
+            requesters = suggestionRequesters,
+            upTarget = inputRequester,
+            onPick = onPickCandidate
+        )
 
-        // Recent keywords: tap one to search again, tap its x to remove it.
+        Spacer(Modifier.height(16.dp))
+
+        Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            // LEFT: QWERTY board and action keys.
+            Column(modifier = Modifier.weight(1f)) {
+                val firstRowUp = if (suggestions.isNotEmpty()) {
+                    suggestionRequesters[0]
+                } else {
+                    inputRequester
+                }
+                keyboardRows.forEachIndexed { rowIndex, row ->
+                    val rightTarget = if (history.isNotEmpty()) {
+                        historyRequesters[minOf(rowIndex, history.size - 1)]
+                    } else {
+                        null
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(vertical = 3.dp)
+                    ) {
+                        row.forEach { ch ->
+                            val index = keyPositions.getValue(ch)
+                            val nextIndex = index + 1
+                            val prevIndex = index - 1
+                            LetterKey(
+                                label = ch,
+                                modifier = Modifier
+                                    .focusRequester(requesters[index])
+                                    .focusProperties {
+                                        this.next = if (nextIndex < letterCount) {
+                                            requesters[nextIndex]
+                                        } else {
+                                            backspaceRequester
+                                        }
+                                        this.previous = if (prevIndex >= 0) {
+                                            requesters[prevIndex]
+                                        } else {
+                                            searchRequester
+                                        }
+                                        belowOf(ch)?.let { below ->
+                                            this.down = requesters[keyPositions.getValue(below)]
+                                        }
+                                        // UP from the first letter row reaches
+                                        // the suggestion strip (or the field).
+                                        if (rowIndex == 0) this.up = firstRowUp
+                                        // RIGHT from the last key of a row
+                                        // enters the history column.
+                                        if (ch == row.last()) {
+                                            val target = rightTarget
+                                            if (target != null) this.right = target
+                                        }
+                                    },
+                                onClick = { onInput(ch) }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    ActionKeyCap(
+                        label = "退格",
+                        modifier = Modifier
+                            .focusRequester(backspaceRequester)
+                            .focusProperties {
+                                this.next = clearRequester
+                                this.previous = requesters[letterCount - 1]
+                            },
+                        onClick = onBackspace
+                    )
+                    ActionKeyCap(
+                        label = "清空",
+                        modifier = Modifier
+                            .focusRequester(clearRequester)
+                            .focusProperties {
+                                this.next = searchRequester
+                                this.previous = backspaceRequester
+                            },
+                        onClick = onClear
+                    )
+                    ActionKeyCap(
+                        label = "搜索",
+                        modifier = Modifier
+                            .focusRequester(searchRequester)
+                            .focusProperties {
+                                this.previous = clearRequester
+                                this.next = requesters[0]
+                            },
+                        accent = true,
+                        onClick = onSubmit
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(24.dp))
+
+            // RIGHT: recent keywords, all focusable with the D-pad.
+            HistoryPanel(
+                history = history,
+                requesters = historyRequesters,
+                clearRequester = clearHistoryRequester,
+                leftTargets = lastColumnRequesters,
+                onPick = onPickHistory,
+                onDelete = onDeleteHistory,
+                onClear = onClearHistory
+            )
+        }
+    }
+}
+
+/** Live suggestion strip, pinned directly under the input field. */
+@Composable
+private fun SuggestionStrip(
+    suggestions: List<String>,
+    requesters: List<FocusRequester>,
+    upTarget: FocusRequester,
+    onPick: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(72.dp)
+    ) {
+        Text(
+            text = if (suggestions.isEmpty()) {
+                "联想片名 · 输入关键词或按左侧字母，联想结果会实时显示在这里"
+            } else {
+                "联想片名 · 按数字 1-${suggestions.size} 快捷选择"
+            },
+            color = TvColors.OnSurfaceMuted,
+            fontSize = 12.sp
+        )
+        Spacer(Modifier.height(7.dp))
+        if (suggestions.isNotEmpty()) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                suggestions.forEachIndexed { index, title ->
+                    val nextTarget = if (index + 1 < suggestions.size) {
+                        requesters[index + 1]
+                    } else {
+                        null
+                    }
+                    val prevTarget = if (index > 0) requesters[index - 1] else upTarget
+                    FocusableTile(
+                        onClick = { onPick(title) },
+                        scaleWhenFocused = 1.06f,
+                        modifier = Modifier
+                            .focusRequester(requesters[index])
+                            .focusProperties {
+                                this.up = upTarget
+                                this.previous = prevTarget
+                                val nxt = nextTarget
+                                if (nxt != null) this.next = nxt
+                            }
+                    ) { focused ->
+                        Chip(title, focused)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Recent keywords on the right, each row focusable (keyword + delete). */
+@Composable
+private fun HistoryPanel(
+    history: List<String>,
+    requesters: List<FocusRequester>,
+    clearRequester: FocusRequester,
+    leftTargets: List<FocusRequester>,
+    onPick: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(300.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(12.dp))
+            .background(TvColors.Surface.copy(alpha = 0.45f))
+            .padding(14.dp)
+    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
@@ -226,74 +450,81 @@ fun SearchScreen(
             Text(
                 "搜索记录",
                 color = TvColors.OnSurface,
-                fontSize = 14.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Medium
             )
             Spacer(Modifier.weight(1f))
-            if (searchHistory.isNotEmpty()) {
-                FocusableTile(onClick = onClearHistory, scaleWhenFocused = 1.06f) { f ->
+            if (history.isNotEmpty()) {
+                FocusableTile(
+                    onClick = onClear,
+                    scaleWhenFocused = 1.06f,
+                    modifier = Modifier.focusRequester(clearRequester)
+                ) { focused ->
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
-                            .tvFocusable(f, RoundedCornerShape(6.dp))
-                            .padding(horizontal = 12.dp, vertical = 5.dp)
+                            .background(if (focused) TvColors.SurfaceHigh else TvColors.Surface)
+                            .tvFocusable(focused, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            "清空记录",
-                            color = if (f) TvColors.Danger else TvColors.OnSurfaceMuted,
+                            "清空",
+                            color = if (focused) TvColors.Danger else TvColors.OnSurfaceMuted,
                             fontSize = 12.sp
                         )
                     }
                 }
             }
         }
-        Spacer(Modifier.height(6.dp))
-        if (searchHistory.isEmpty()) {
+
+        Spacer(Modifier.height(12.dp))
+
+        if (history.isEmpty()) {
             Text(
-                "暂无记录 · 搜索过的关键词会自动保存在这里",
+                "暂无记录 · 搜索过的关键词会自动保存在这里，上焦即可一键重搜",
                 color = TvColors.OnSurfaceMuted,
                 fontSize = 12.sp
             )
         } else {
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(end = 16.dp),
-                modifier = Modifier.fillMaxWidth()
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(9.dp)
             ) {
-                itemsIndexed(searchHistory, key = { _, kw -> kw }) { _, kw ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        FocusableTile(onClick = { onPickHistory(kw) }) { f ->
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (f) TvColors.Primary else TvColors.SurfaceHigh)
-                                    .tvFocusable(f, RoundedCornerShape(6.dp))
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)
-                            ) {
-                                Text(
-                                    kw,
-                                    color = if (f) Color(0xFF14181D) else TvColors.OnSurface,
-                                    fontSize = 13.sp,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(4.dp))
+                history.forEachIndexed { index, keyword ->
+                    val leftTarget = leftTargets[minOf(index, leftTargets.size - 1)]
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         FocusableTile(
-                            onClick = { onDeleteHistory(kw) },
+                            onClick = { onPick(keyword) },
+                            scaleWhenFocused = 1.04f,
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(requesters[index])
+                                .focusProperties { this.left = leftTarget }
+                        ) { focused ->
+                            Chip(keyword, focused)
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        FocusableTile(
+                            onClick = { onDelete(keyword) },
                             scaleWhenFocused = 1.06f
-                        ) { f ->
+                        ) { focused ->
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
-                                    .background(if (f) TvColors.Danger else TvColors.Surface)
-                                    .tvFocusable(f, RoundedCornerShape(6.dp))
+                                    .background(
+                                        if (focused) TvColors.Danger else TvColors.Surface
+                                    )
+                                    .tvFocusable(focused, RoundedCornerShape(6.dp))
                                     .padding(horizontal = 9.dp, vertical = 7.dp)
                             ) {
                                 Text(
                                     "×",
-                                    color = if (f) Color.White else TvColors.OnSurfaceMuted,
+                                    color = if (focused) Color.White else TvColors.OnSurfaceMuted,
                                     fontSize = 13.sp
                                 )
                             }
@@ -302,124 +533,24 @@ fun SearchScreen(
                 }
             }
         }
+    }
+}
 
-        Spacer(Modifier.height(10.dp))
-
-        // Pinyin candidates for the current initials
-        if (candidates.isNotEmpty()) {
-            Text(
-                "候选片名",
-                color = TvColors.OnSurface,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(Modifier.height(6.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-            ) {
-                candidates.forEach { title ->
-                    FocusableTile(onClick = { onPickCandidate(title) }) { f ->
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (f) TvColors.Primary else TvColors.SurfaceHigh)
-                                .tvFocusable(f, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 12.dp, vertical = 7.dp)
-                        ) {
-                            Text(
-                                title,
-                                color = if (f) Color(0xFF14181D) else TvColors.OnSurface,
-                                fontSize = 13.sp
-                            )
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-        }
-
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-        ) {
-            keyboardRows.forEachIndexed { rowIndex, row ->
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
-                    modifier = Modifier.padding(vertical = 3.dp)
-                ) {
-                    row.forEach { ch ->
-                        val index = keyPositions.getValue(ch)
-                        val requester = requesters[index]
-                        val nextIndex = index + 1
-                        val prevIndex = index - 1
-                        LetterKey(
-                            label = ch,
-                            modifier = Modifier
-                                .focusRequester(requester)
-                                .focusProperties {
-                                    this.next = if (nextIndex < letterCount) {
-                                        requesters[nextIndex]
-                                    } else {
-                                        backspaceRequester
-                                    }
-                                    this.previous = if (prevIndex >= 0) {
-                                        requesters[prevIndex]
-                                    } else {
-                                        searchRequester
-                                    }
-                                    belowOf(ch)?.let { below ->
-                                        this.down = requesters[keyPositions.getValue(below)]
-                                    }
-                                    // UP from the first letter row always
-                                    // reaches the focusable text field.
-                                    if (rowIndex == 0) this.up = inputRequester
-                                },
-                            onClick = { onInput(ch) }
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                ActionKeyCap(
-                    label = "退格",
-                    modifier = Modifier
-                        .focusRequester(backspaceRequester)
-                        .focusProperties {
-                            this.next = clearRequester
-                            this.previous = requesters[letterCount - 1]
-                        },
-                    onClick = onBackspace
-                )
-                ActionKeyCap(
-                    label = "清空",
-                    modifier = Modifier
-                        .focusRequester(clearRequester)
-                        .focusProperties {
-                            this.next = searchRequester
-                            this.previous = backspaceRequester
-                        },
-                    onClick = onClear
-                )
-                ActionKeyCap(
-                    label = "搜索",
-                    modifier = Modifier
-                        .focusRequester(searchRequester)
-                        .focusProperties {
-                            this.previous = clearRequester
-                            this.next = requesters[0]
-                        },
-                    accent = true,
-                    onClick = onSubmit
-                )
-            }
-        }
+@Composable
+private fun Chip(text: String, focused: Boolean) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (focused) TvColors.Primary else TvColors.SurfaceHigh)
+            .tvFocusable(focused, RoundedCornerShape(6.dp))
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+    ) {
+        Text(
+            text,
+            color = if (focused) Color(0xFF14181D) else TvColors.OnSurface,
+            fontSize = 13.sp,
+            maxLines = 1
+        )
     }
 }
 
@@ -432,8 +563,8 @@ private fun LetterKey(
     FocusableTile(onClick = onClick, modifier = modifier) { f ->
         Box(
             modifier = Modifier
-                .width(62.dp)
-                .height(52.dp)
+                .width(46.dp)
+                .height(50.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
                 .tvFocusable(f, RoundedCornerShape(8.dp)),
@@ -442,7 +573,7 @@ private fun LetterKey(
             Text(
                 label,
                 color = if (f) TvColors.Primary else TvColors.OnSurface,
-                fontSize = 17.sp,
+                fontSize = 16.sp,
                 fontWeight = if (f) FontWeight.Medium else FontWeight.Normal,
                 textAlign = TextAlign.Center
             )
@@ -460,8 +591,8 @@ private fun ActionKeyCap(
     FocusableTile(onClick = onClick, modifier = modifier) { f ->
         Box(
             modifier = Modifier
-                .width(112.dp)
-                .height(52.dp)
+                .width(88.dp)
+                .height(50.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(
                     when {
