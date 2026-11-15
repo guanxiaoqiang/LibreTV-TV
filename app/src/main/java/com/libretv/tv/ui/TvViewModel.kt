@@ -867,29 +867,32 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- Keyboard search input ----------
 
     /**
-     * Type one letter. The buffer holds raw letters; the visible query is the
-     * Chinese title the pinyin index resolves them to, when there is a hit.
+     * Type one letter on the on-screen board. The letters only accumulate in
+     * the pinyin buffer that drives the suggestion strip — the input field
+     * keeps showing exactly what the viewer typed with the IME, nothing else.
      */
     fun inputLetter(letter: String) {
         val s = _state.value
-        val buffer = s.t9Buffer + letter.lowercase()
         _state.value = s.copy(
-            t9Buffer = buffer,
-            t9LastDigit = null,
-            query = resolveQuery(buffer)
+            t9Buffer = s.t9Buffer + letter.lowercase(),
+            t9LastDigit = null
         )
     }
 
     fun t9Backspace() {
         val s = _state.value
-        val buf = s.t9Buffer
-        if (buf.isEmpty()) return
-        val trimmed = buf.dropLast(1)
-        _state.value = s.copy(
-            t9Buffer = trimmed,
-            t9LastDigit = null,
-            query = resolveQuery(trimmed)
-        )
+        when {
+            // Board letters are erased first; once they are gone the key acts
+            // on the visible query so the remote backspace always works.
+            s.t9Buffer.isNotEmpty() -> _state.value = s.copy(
+                t9Buffer = s.t9Buffer.dropLast(1),
+                t9LastDigit = null
+            )
+            s.query.isNotEmpty() -> _state.value = s.copy(
+                query = s.query.dropLast(1),
+                t9LastDigit = null
+            )
+        }
     }
 
     fun t9Clear() {
@@ -911,13 +914,17 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    /** Use a candidate title directly as the search term. */
+    /**
+     * A suggestion chip (or the 1-8 number shortcut) is a final choice: it
+     * must not merely fill the input field — it jumps straight to the search
+     * results for that title.
+     */
     fun pickCandidate(title: String) {
         _state.value = _state.value.copy(
-            query = title,
             t9Buffer = "",
             t9LastDigit = null
         )
+        submitSearch(title)
     }
 
     /**
@@ -955,7 +962,9 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun submitSearch(keyword: String = _state.value.query) {
-        val kw = keyword.trim()
+        // Board-only typing never touches the input field, so pressing 搜索
+        // with an empty field falls back to the best pinyin-initials match.
+        val kw = keyword.ifBlank { resolveQuery(_state.value.t9Buffer) }.trim()
         if (kw.isEmpty()) return
         searchHistoryStore.add(kw)
         val letters = rawLetters()

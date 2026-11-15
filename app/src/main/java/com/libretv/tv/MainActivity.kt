@@ -223,6 +223,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
 
         Screen.SEARCH -> SearchScreen(
             query = state.query,
+            letters = state.t9Buffer,
             candidates = vm.candidateTitles(),
             searchHistory = state.searchHistory,
             onQueryChange = { vm.setQuery(it) },

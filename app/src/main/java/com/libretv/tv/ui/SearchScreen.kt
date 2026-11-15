@@ -79,6 +79,7 @@ private const val MAX_HISTORY_ROWS = 12
 @Composable
 fun SearchScreen(
     query: String,
+    letters: String,
     candidates: List<String>,
     searchHistory: List<String>,
     onQueryChange: (String) -> Unit,
@@ -274,7 +275,7 @@ fun SearchScreen(
                 ) {
                     if (query.isEmpty()) {
                         Text(
-                            "上焦本框可拉起键盘直接输入；也可用左侧全键盘选字母，拼音首字母可搜中文片名",
+                            "上焦本框可拉起键盘直接输入；左侧全键盘按字母出联想，点联想词直接搜索",
                             color = TvColors.OnSurfaceMuted,
                             fontSize = 14.sp,
                             maxLines = 1
@@ -286,9 +287,12 @@ fun SearchScreen(
         )
 
         // Live suggestions sit immediately below the field, above both columns.
+        // Board letters never enter the input field, so the strip label doubles
+        // as the feedback line showing what was typed on the board.
         Spacer(Modifier.height(8.dp))
         SuggestionStrip(
             suggestions = suggestions,
+            letters = letters,
             requesters = suggestionRequesters,
             upTarget = inputRequester,
             onPick = onPickCandidate
@@ -409,6 +413,7 @@ fun SearchScreen(
 @Composable
 private fun SuggestionStrip(
     suggestions: List<String>,
+    letters: String,
     requesters: List<FocusRequester>,
     upTarget: FocusRequester,
     onPick: (String) -> Unit
@@ -419,10 +424,15 @@ private fun SuggestionStrip(
             .height(72.dp)
     ) {
         Text(
-            text = if (suggestions.isEmpty()) {
-                "联想片名 · 输入关键词或按左侧字母，联想结果会实时显示在这里"
-            } else {
-                "联想片名 · 按数字 1-${suggestions.size} 快捷选择"
+            text = when {
+                letters.isNotEmpty() && suggestions.isNotEmpty() ->
+                    "已输入 $letters · 共 ${suggestions.size} 个联想，点按或数字 1-${suggestions.size} 直接搜索"
+                letters.isNotEmpty() ->
+                    "已输入 $letters · 暂无匹配片名，可按退格修改或上焦输入框直接输入"
+                suggestions.isNotEmpty() ->
+                    "联想片名 · 点按或数字 1-${suggestions.size} 直接搜索对应片名"
+                else ->
+                    "联想片名 · 左侧键盘按拼音首字母出联想，输入框输入时实时显示在这里"
             },
             color = TvColors.OnSurfaceMuted,
             fontSize = 12.sp
