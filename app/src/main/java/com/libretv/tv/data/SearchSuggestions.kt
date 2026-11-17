@@ -3,16 +3,33 @@ package com.libretv.tv.data
 /**
  * Suggestions shown in the strip directly below the search field.
  *
- * Two input paths feed the same strip:
+ * The strip reacts to whatever is in the search field:
  *
- *  - the on-screen QWERTY board, which accumulates pinyin initials;
- *  - the focusable text field, where the IME produces free text (usually
- *    Chinese) one character at a time.
+ *  - plain latin typed on the on-screen board (letters, digits, space) is
+ *    resolved through the pinyin-initial index;
+ *  - free text from the IME (usually Chinese) matches bundled titles and
+ *    recent keywords as the viewer types.
  *
  * Keeping the matching here (instead of inside the view model) makes the
  * behaviour cheap to unit test and keeps recomposition-independent.
  */
 object SearchSuggestions {
+
+    /**
+     * The pinyin-initials part of [text], or an empty string when the text is
+     * not plain latin.
+     *
+     * The board types its characters straight into the input field, so the
+     * field text is the only source of truth. Spaces are ignored here: the
+     * board inserts them as word separators, while the pinyin index is keyed
+     * by plain letter runs ("zhang jie" -> "zhangjie").
+     */
+    fun pinyinInitials(text: String): String {
+        val letters = text.replace(" ", "").replace("\u3000", "")
+        if (letters.isEmpty()) return ""
+        if (!letters.all { it in 'a'..'z' || it in 'A'..'Z' }) return ""
+        return letters.lowercase()
+    }
 
     /**
      * @param titleIndex pinyin initials -> Chinese title, loaded from assets.

@@ -72,9 +72,12 @@ data class UiState(
     val adFilterEnabled: Boolean = true,
     /** Which poster metadata tags are visible. */
     val badgeVisibility: BadgeVisibility = BadgeVisibility(),
+    /**
+     * The visible search text. The on-screen board types straight into it,
+     * so the input field always mirrors the keyboard and the suggestion
+     * strip below reacts to the very same string.
+     */
     val query: String = "",
-    val t9Buffer: String = "",
-    val t9LastDigit: Int? = null,
     /** Recent search keywords, newest first, persisted in SharedPreferences. */
     val searchHistory: List<String> = emptyList(),
     val results: List<SearchResult> = emptyList(),
@@ -826,8 +829,6 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         searchHistoryStore.add(title)
         _state.value = _state.value.copy(
             query = title,
-            t9Buffer = "",
-            t9LastDigit = null,
             screen = Screen.RESULT,
             searching = true,
             results = emptyList(),
@@ -877,90 +878,84 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- Keyboard search input ----------
 
     /**
-     * Type one letter on the on-screen board. The letters only accumulate in
-     * the pinyin buffer that drives the suggestion strip — the input field
-     * keeps showing exactly what the viewer typed with the IME, nothing else.
+     * Type one character on the on-screen board (letter, digit or space). It
+     * goes straight into the visible query, so the input field always mirrors
+     * what the keyboard produced and the suggestion strip below reacts to the
+     * very same text.
      */
-    fun inputLetter(letter: String) {
+    fun inputChar(ch: String) {
+        if (ch.isEmpty()) return
         val s = _state.value
-        _state.value = s.copy(
-            t9Buffer = s.t9Buffer + letter.lowercase(),
-            t9LastDigit = null
-        )
+        _state.value = s.copy(query = s.query + ch)
     }
 
-    fun t9Backspace() {
+    /** Delete the last character of the visible query. */
+    fun deleteLastChar() {
         val s = _state.value
-        when {
-            // Board letters are erased first; once they are gone the key acts
-            // on the visible query so the remote backspace always works.
-            s.t9Buffer.isNotEmpty() -> _state.value = s.copy(
-                t9Buffer = s.t9Buffer.dropLast(1),
-                t9LastDigit = null
-            )
-            s.query.isNotEmpty() -> _state.value = s.copy(
-                query = s.query.dropLast(1),
-                t9LastDigit = null
-            )
-        }
+        if (s.query.isEmpty()) return
+        _state.value = s.copy(query = s.query.dropLast(1))
     }
 
-    fun t9Clear() {
-        _state.value = _state.value.copy(t9Buffer = "", t9LastDigit = null, query = "")
+    /** Empty the visible query. */
+    fun clearInput() {
+        _state.value = _state.value.copy(query = "")
     }
 
     /**
-     * Suggestions for the strip directly under the input field. The on-screen
-     * letters still resolve through the pinyin index; free text from the IME
-     * matches bundled titles and recent keywords as the viewer types.
+     * Suggestions for the strip directly under the input field. The text in
+     * the field drives the strip: plain latin resolves through the pinyin
+     * index, anything else matches bundled titles and recent keywords.
      */
     fun candidateTitles(): List<String> {
         val s = _state.value
+        val initials = SearchSuggestions.pinyinInitials(s.query)
+        val pinyin = SearchSuggestions.suggest(
+            titleIndex = titleIndex,
+            history = s.searchHistory,
+            initials = initials,
+            query = s.query
+        )
+        if (pinyin.isNotEmpty()) return pinyin
+        // No pinyin hit: fall back to plain text matching, so a keyword that
+        // really was typed still shows up in the strip.
         return SearchSuggestions.suggest(
             titleIndex = titleIndex,
             history = s.searchHistory,
-            initials = s.t9Buffer,
+            initials = "",
             query = s.query
         )
     }
 
     /**
-     * A suggestion chip (or the 1-8 number shortcut) is a final choice: it
-     * must not merely fill the input field — it jumps straight to the search
-     * results for that title.
+     * A suggestion chip is a final choice: it must not merely fill the input
+     * field — it jumps straight to the search results for that title.
      */
     fun pickCandidate(title: String) {
-        _state.value = _state.value.copy(
-            t9Buffer = "",
-            t9LastDigit = null
-        )
-        submitSearch(title)
+        startSearch(title, resolvePinyin = false)
     }
 
     /**
-     * Latin input alone cannot match Chinese collectors, so map the typed letters
-     * onto a bundled pinyin-initial index. Exact initials win; otherwise the
-     * longest prefix match is used. When nothing matches, the raw letters stay
-     * and the search falls back to them.
+     * Latin input alone cannot match Chinese collectors, so map the typed
+     * letters onto a bundled pinyin-initial index. Exact initials win;
+     * otherwise the longest prefix match is used. When nothing matches, the
+     * raw text stays and the search falls back to it.
      */
-    private fun resolveQuery(letters: String): String {
-        val lower = letters.lowercase()
-        if (lower.isEmpty()) return ""
-        if (lower.all { it.isLetter() }) {
+    private fun resolveQuery(text: String): String {
+        val trimmed = text.trim()
+        val letters = trimmed.replace(" ", "")
+        if (letters.isNotEmpty() && letters.all { it in 'a'..'z' || it in 'A'..'Z' }) {
+            val lower = letters.lowercase()
             titleIndex[lower]?.let { return it }
             val hit = titleIndex.entries
                 .filter { (initials, _) -> initials.startsWith(lower) }
                 .maxByOrNull { it.key.length }
             if (hit != null) return hit.value
         }
-        return letters
+        return trimmed
     }
 
-    /** The letters as typed, kept for a fallback search pass. */
-    private fun rawLetters(): String = _state.value.t9Buffer.lowercase()
-
     fun setQuery(q: String) {
-        _state.value = _state.value.copy(query = q, t9Buffer = "", t9LastDigit = null)
+        _state.value = _state.value.copy(query = q)
     }
 
     fun deleteSearchHistory(keyword: String) {
@@ -971,13 +966,26 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         searchHistoryStore.clear()
     }
 
-    fun submitSearch(keyword: String = _state.value.query) {
-        // Board-only typing never touches the input field, so pressing 搜索
-        // with an empty field falls back to the best pinyin-initials match.
-        val kw = keyword.ifBlank { resolveQuery(_state.value.t9Buffer) }.trim()
+    /** Search the text currently in the input field. */
+    fun submitSearch() {
+        val typed = _state.value.query.trim()
+        if (typed.isEmpty()) return
+        startSearch(typed, resolvePinyin = true)
+    }
+
+    /** Search a keyword exactly as given, e.g. a chip in the history list. */
+    fun searchKeyword(keyword: String) {
+        val kw = keyword.trim()
+        if (kw.isEmpty()) return
+        startSearch(kw, resolvePinyin = false)
+    }
+
+    private fun startSearch(keyword: String, resolvePinyin: Boolean) {
+        val kw = (if (resolvePinyin) resolveQuery(keyword) else keyword).trim()
         if (kw.isEmpty()) return
         searchHistoryStore.add(kw)
-        val letters = rawLetters()
+        // The plain letters are kept for a fallback search pass.
+        val letters = if (resolvePinyin) keyword.replace(" ", "").lowercase() else ""
         _state.value = _state.value.copy(
             screen = Screen.RESULT,
             query = kw,

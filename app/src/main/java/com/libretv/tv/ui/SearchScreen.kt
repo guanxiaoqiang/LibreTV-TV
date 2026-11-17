@@ -49,12 +49,30 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Full QWERTY layout, laid out as rows so the D-pad can walk it. */
+/**
+ * The on-screen board: a number row on top, then the three QWERTY rows.
+ * Every key types its own character into the input field.
+ */
 private val keyboardRows = listOf(
+    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
     listOf("Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"),
     listOf("A", "S", "D", "F", "G", "H", "J", "K", "L"),
     listOf("Z", "X", "C", "V", "B", "N", "M")
 )
+
+/** Board geometry in dp, used to work out the up / down focus neighbours. */
+private const val KEY_WIDTH_DP = 46
+private const val KEY_SPACING_DP = 6
+
+/**
+ * Horizontal centre of the key at [index] inside a row of [count] keys. The
+ * rows are centred, so a key of one row lines up with the key of another
+ * row that sits closest to the same centre.
+ */
+private fun keyCentre(index: Int, count: Int): Float {
+    val rowWidth = count * KEY_WIDTH_DP + (count - 1) * KEY_SPACING_DP
+    return (rowWidth - KEY_WIDTH_DP) / 2f + index * (KEY_WIDTH_DP + KEY_SPACING_DP)
+}
 
 private const val MAX_SUGGESTIONS = 8
 private const val MAX_HISTORY_ROWS = 12
@@ -65,21 +83,23 @@ private const val MAX_HISTORY_ROWS = 12
  * ```
  *  [ focusable input field                                      ]
  *  [ live suggestion strip, directly under the field           ]
- *  [ QWERTY board + action keys ]   [ focusable search history  ]
+ *  [ number row + QWERTY board + action keys ] [ search history ]
  * ```
  *
- * Three complementary input paths: the on-screen board (pinyin initials),
- * a real text field with the IME for Chinese / free text, and one-tap recent
- * keywords on the right. The suggestion strip reacts to both typing paths.
+ * The on-screen board (letters, digits and space) types straight into the
+ * input field, so the field always shows the characters that were just
+ * pressed. Suggestions never appear inside the field — they live in the
+ * strip right below it, and picking one jumps straight to the results.
+ *
+ * A real text field with the IME is still there for Chinese / free text, and
+ * one-tap recent keywords sit on the right.
  *
  * While the text field holds focus every physical key is left to the IME; the
- * root key handler below would otherwise also fold letters into the pinyin
- * buffer and double-apply input.
+ * root key handler below would otherwise type the same character twice.
  */
 @Composable
 fun SearchScreen(
     query: String,
-    letters: String,
     candidates: List<String>,
     searchHistory: List<String>,
     onQueryChange: (String) -> Unit,
@@ -95,12 +115,15 @@ fun SearchScreen(
     val suggestions = candidates.take(MAX_SUGGESTIONS)
     val history = searchHistory.take(MAX_HISTORY_ROWS)
 
-    // One requester per letter key plus one per action key.
-    val letterCount = keyboardRows.sumOf { it.size }
-    val requesters = remember { List(letterCount + 3) { FocusRequester() } }
-    val backspaceRequester = requesters[letterCount]
-    val clearRequester = requesters[letterCount + 1]
-    val searchRequester = requesters[letterCount + 2]
+    // One requester per board key plus one per action key (space, backspace,
+    // clear, search).
+    val boardKeys = remember { keyboardRows.flatten() }
+    val boardCount = boardKeys.size
+    val requesters = remember { List(boardCount + 4) { FocusRequester() } }
+    val spaceRequester = requesters[boardCount]
+    val backspaceRequester = requesters[boardCount + 1]
+    val clearRequester = requesters[boardCount + 2]
+    val searchRequester = requesters[boardCount + 3]
     val inputRequester = remember { FocusRequester() }
     val suggestionRequesters = remember { List(MAX_SUGGESTIONS) { FocusRequester() } }
     val historyRequesters = remember { List(MAX_HISTORY_ROWS) { FocusRequester() } }
@@ -119,17 +142,15 @@ fun SearchScreen(
     // Remember where each key sits so the chain can be built.
     val keyPositions = remember {
         val map = mutableMapOf<String, Int>()
-        var i = 0
-        keyboardRows.forEach { row -> row.forEach { ch -> map[ch] = i; i++ } }
+        boardKeys.forEachIndexed { index, ch -> map[ch] = index }
         map
     }
 
-    // Column of every letter, so "down" can find the key below it even though
-    // the three rows have different widths.
-    val columnOf = remember {
+    // Row of every key, so "up" / "down" can find the neighbouring row.
+    val rowOf = remember {
         val map = mutableMapOf<String, Int>()
-        keyboardRows.forEach { row ->
-            row.forEachIndexed { colIndex, ch -> map[ch] = colIndex }
+        keyboardRows.forEachIndexed { rowIndex, row ->
+            row.forEach { ch -> map[ch] = rowIndex }
         }
         map
     }
@@ -143,12 +164,23 @@ fun SearchScreen(
         }
     }
 
-    /** The letter directly below [ch], if the layout has one. */
-    fun belowOf(ch: String): String? {
-        val col = columnOf[ch] ?: return null
-        val rowIndex = keyboardRows.indexOfFirst { ch in it }
-        if (rowIndex < 0 || rowIndex == keyboardRows.lastIndex) return null
-        return keyboardRows[rowIndex + 1].getOrNull(col)
+    /**
+     * The key directly above / below [ch]. The rows have different widths, so
+     * the neighbour is the one whose horizontal centre is closest to the
+     * centre of [ch] in the neighbouring row.
+     */
+    fun verticalNeighbour(ch: String, step: Int): String? {
+        val rowIndex = rowOf[ch] ?: return null
+        val targetRowIndex = rowIndex + step
+        if (targetRowIndex < 0 || targetRowIndex >= keyboardRows.size) return null
+        val row = keyboardRows[rowIndex]
+        val column = row.indexOf(ch)
+        val centre = keyCentre(column, row.size)
+        val target = keyboardRows[targetRowIndex]
+        val best = target.indices.minByOrNull { index ->
+            kotlin.math.abs(keyCentre(index, target.size) - centre)
+        }
+        return best?.let { target[it] }
     }
 
     LaunchedEffect(Unit) {
@@ -204,15 +236,15 @@ fun SearchScreen(
                         if (letter.isNotEmpty()) onInput(letter)
                         true
                     }
-                    // The number row is the fastest path on a TV remote: 1-8
-                    // pick the matching suggestion directly, 0 submits.
-                    in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9 -> {
-                        val index = event.nativeKeyEvent.keyCode - KeyEvent.KEYCODE_1
-                        suggestions.getOrNull(index)?.let { onPickCandidate(it) }
+                    // The number row types digits into the field, exactly like
+                    // the number keys of the on-screen board.
+                    in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> {
+                        val digit = event.nativeKeyEvent.keyCode - KeyEvent.KEYCODE_0
+                        onInput(digit.toString())
                         true
                     }
-                    KeyEvent.KEYCODE_0 -> {
-                        onSubmit()
+                    KeyEvent.KEYCODE_SPACE -> {
+                        onInput(" ")
                         true
                     }
                     else -> false
@@ -275,7 +307,7 @@ fun SearchScreen(
                 ) {
                     if (query.isEmpty()) {
                         Text(
-                            "上焦本框可拉起键盘直接输入；左侧全键盘按字母出联想，点联想词直接搜索",
+                            "上焦本框可拉起键盘直接输入；左侧键盘输入的字符会实时显示在这里，联想词只出现在下方",
                             color = TvColors.OnSurfaceMuted,
                             fontSize = 14.sp,
                             maxLines = 1
@@ -287,12 +319,12 @@ fun SearchScreen(
         )
 
         // Live suggestions sit immediately below the field, above both columns.
-        // Board letters never enter the input field, so the strip label doubles
-        // as the feedback line showing what was typed on the board.
+        // They never render inside the field: the field shows the typed text
+        // only, the strip below it shows what can be picked.
         Spacer(Modifier.height(8.dp))
         SuggestionStrip(
             suggestions = suggestions,
-            letters = letters,
+            query = query,
             requesters = suggestionRequesters,
             upTarget = inputRequester,
             onPick = onPickCandidate
@@ -301,7 +333,7 @@ fun SearchScreen(
         Spacer(Modifier.height(16.dp))
 
         Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            // LEFT: QWERTY board and action keys.
+            // LEFT: number row, QWERTY board and action keys.
             Column(modifier = Modifier.weight(1f)) {
                 val firstRowUp = if (suggestions.isNotEmpty()) {
                     suggestionRequesters[0]
@@ -315,33 +347,38 @@ fun SearchScreen(
                         null
                     }
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(vertical = 3.dp)
+                        horizontalArrangement = Arrangement.spacedBy(
+                            6.dp,
+                            Alignment.CenterHorizontally
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
                     ) {
                         row.forEach { ch ->
                             val index = keyPositions.getValue(ch)
                             val nextIndex = index + 1
                             val prevIndex = index - 1
-                            LetterKey(
+                            BoardKey(
                                 label = ch,
                                 modifier = Modifier
                                     .focusRequester(requesters[index])
                                     .focusProperties {
-                                        this.next = if (nextIndex < letterCount) {
+                                        this.next = if (nextIndex < boardCount) {
                                             requesters[nextIndex]
                                         } else {
-                                            backspaceRequester
+                                            spaceRequester
                                         }
                                         this.previous = if (prevIndex >= 0) {
                                             requesters[prevIndex]
                                         } else {
                                             searchRequester
                                         }
-                                        belowOf(ch)?.let { below ->
+                                        verticalNeighbour(ch, 1)?.let { below ->
                                             this.down = requesters[keyPositions.getValue(below)]
                                         }
-                                        // UP from the first letter row reaches
-                                        // the suggestion strip (or the field).
+                                        // UP from the number row reaches the
+                                        // suggestion strip (or the field).
                                         if (rowIndex == 0) this.up = firstRowUp
                                         // RIGHT from the last key of a row
                                         // enters the history column.
@@ -350,7 +387,7 @@ fun SearchScreen(
                                             if (target != null) this.right = target
                                         }
                                     },
-                                onClick = { onInput(ch) }
+                                onClick = { onInput(ch.lowercase()) }
                             )
                         }
                     }
@@ -358,14 +395,30 @@ fun SearchScreen(
 
                 Spacer(Modifier.height(10.dp))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(
+                        7.dp,
+                        Alignment.CenterHorizontally
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    ActionKeyCap(
+                        label = "空格",
+                        modifier = Modifier
+                            .focusRequester(spaceRequester)
+                            .focusProperties {
+                                this.next = backspaceRequester
+                                this.previous = requesters[boardCount - 1]
+                            },
+                        onClick = { onInput(" ") }
+                    )
                     ActionKeyCap(
                         label = "退格",
                         modifier = Modifier
                             .focusRequester(backspaceRequester)
                             .focusProperties {
                                 this.next = clearRequester
-                                this.previous = requesters[letterCount - 1]
+                                this.previous = spaceRequester
                             },
                         onClick = onBackspace
                     )
@@ -413,7 +466,7 @@ fun SearchScreen(
 @Composable
 private fun SuggestionStrip(
     suggestions: List<String>,
-    letters: String,
+    query: String,
     requesters: List<FocusRequester>,
     upTarget: FocusRequester,
     onPick: (String) -> Unit
@@ -425,14 +478,14 @@ private fun SuggestionStrip(
     ) {
         Text(
             text = when {
-                letters.isNotEmpty() && suggestions.isNotEmpty() ->
-                    "已输入 $letters · 共 ${suggestions.size} 个联想，点按或数字 1-${suggestions.size} 直接搜索"
-                letters.isNotEmpty() ->
-                    "已输入 $letters · 暂无匹配片名，可按退格修改或上焦输入框直接输入"
+                query.isNotEmpty() && suggestions.isNotEmpty() ->
+                    "已输入 $query · 共 ${suggestions.size} 个联想，点按直接搜索"
+                query.isNotEmpty() ->
+                    "已输入 $query · 暂无匹配片名，可按退格修改或上焦输入框直接输入"
                 suggestions.isNotEmpty() ->
-                    "联想片名 · 点按或数字 1-${suggestions.size} 直接搜索对应片名"
+                    "联想片名 · 点按直接搜索对应片名"
                 else ->
-                    "联想片名 · 左侧键盘按拼音首字母出联想，输入框输入时实时显示在这里"
+                    "联想片名 · 左侧键盘输入的字符会实时显示在上方输入框，联想词只出现在这里"
             },
             color = TvColors.OnSurfaceMuted,
             fontSize = 12.sp
@@ -603,7 +656,7 @@ private fun Chip(text: String, focused: Boolean) {
 }
 
 @Composable
-private fun LetterKey(
+private fun BoardKey(
     label: String,
     modifier: Modifier = Modifier,
     onClick: () -> Unit

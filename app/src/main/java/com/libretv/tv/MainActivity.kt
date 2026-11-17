@@ -222,16 +222,15 @@ fun TvApp(vm: TvViewModel = viewModel()) {
 
         Screen.SEARCH -> SearchScreen(
             query = state.query,
-            letters = state.t9Buffer,
             candidates = vm.candidateTitles(),
             searchHistory = state.searchHistory,
             onQueryChange = { vm.setQuery(it) },
-            onInput = { vm.inputLetter(it) },
-            onBackspace = { vm.t9Backspace() },
+            onInput = { vm.inputChar(it) },
+            onBackspace = { vm.deleteLastChar() },
             onSubmit = { vm.submitSearch() },
-            onClear = { vm.t9Clear() },
+            onClear = { vm.clearInput() },
             onPickCandidate = { vm.pickCandidate(it) },
-            onPickHistory = { vm.submitSearch(it) },
+            onPickHistory = { vm.searchKeyword(it) },
             onDeleteHistory = { vm.deleteSearchHistory(it) },
             onClearHistory = { vm.clearSearchHistory() }
         )

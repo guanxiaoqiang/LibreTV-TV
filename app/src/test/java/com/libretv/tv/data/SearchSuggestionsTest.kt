@@ -64,4 +64,15 @@ class SearchSuggestionsTest {
         assertEquals(5, suggestions.size)
         assertEquals(suggestions.distinct(), suggestions)
     }
+
+    @Test
+    fun `pinyin initials ignore spaces and reject anything but latin letters`() {
+        assertEquals("zhangjie", SearchSuggestions.pinyinInitials("Zhang Jie"))
+        assertEquals("ll", SearchSuggestions.pinyinInitials("ll"))
+        // Digits and Chinese are not pinyin initials: those fall back to the
+        // free text matching of the strip.
+        assertEquals("", SearchSuggestions.pinyinInitials("ll2"))
+        assertEquals("", SearchSuggestions.pinyinInitials("流浪"))
+        assertEquals("", SearchSuggestions.pinyinInitials(""))
+    }
 }
