@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -174,8 +174,13 @@ fun SourcePickerScreen(
                 contentPadding = PaddingValues(bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(group.offers, key = { it.key }) { offer ->
-                    val index = group.offers.indexOf(offer)
+                // The key carries the slot as well as the offer identity: two
+                // collectors can publish the same name + vod id, and a repeated
+                // LazyColumn key is fatal rather than merely ugly.
+                itemsIndexed(
+                    group.offers,
+                    key = { index, offer -> "${offer.key}#$index" }
+                ) { index, offer ->
                     val recommended = index == 0 && !offer.isTrailer
                     FocusableTile(onClick = { onPick(offer) }) { focused ->
                         OfferRow(

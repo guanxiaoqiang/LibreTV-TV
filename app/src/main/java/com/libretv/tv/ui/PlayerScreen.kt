@@ -233,10 +233,16 @@ fun PlayerScreen(
     }
 
     // The control panel hides itself when the viewer stops touching it.
-    LaunchedEffect(panelVisible, episodePickerVisible, interactionTick) {
-        if (panelVisible && !episodePickerVisible) {
+    //
+    // An error card is exempt: it owns the focus, and hiding the panel under a
+    // dialog used to flip the root focusable on mid-dialog, which crashed the
+    // focus transaction (see rootRequester below).
+    LaunchedEffect(panelVisible, episodePickerVisible, errorText, interactionTick) {
+        if (panelVisible && !episodePickerVisible && errorText == null) {
             kotlinx.coroutines.delay(PANEL_IDLE_MS)
-            if (panelVisible && !episodePickerVisible) panelVisible = false
+            if (panelVisible && !episodePickerVisible && errorText == null) {
+                panelVisible = false
+            }
         }
     }
 
@@ -244,9 +250,15 @@ fun PlayerScreen(
     // which would leave the screen without a focus target and make all the
     // keys dead. The root keeps the focus so the remote stays in control.
     val rootRequester = remember { FocusRequester() }
-    LaunchedEffect(panelVisible, episodePickerVisible) {
-        if (!panelVisible && !episodePickerVisible) {
-            rootRequester.requestFocus()
+    LaunchedEffect(panelVisible, episodePickerVisible, errorText) {
+        if (!panelVisible && !episodePickerVisible && errorText == null) {
+            // The root only becomes focusable in the same recomposition that
+            // hides the panel, so the node can still be unattached when this
+            // effect runs. Retry a few frames instead of crashing.
+            repeat(3) {
+                if (rootRequester.requestFocusSafely()) return@LaunchedEffect
+                kotlinx.coroutines.delay(16)
+            }
         }
     }
 
@@ -580,7 +592,7 @@ private fun ControlPanel(
 
     LaunchedEffect(Unit) {
         // Take focus on the play button when the panel appears.
-        buttonRequesters[playSlot].requestFocus()
+        buttonRequesters[playSlot].requestFocusSafely()
     }
 
     Column(
@@ -891,7 +903,7 @@ private fun EpisodePicker(
     val closeRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
-        episodeRequesters.firstOrNull()?.requestFocus()
+        episodeRequesters.firstOrNull()?.requestFocusSafely()
     }
 
     Column(
@@ -1020,7 +1032,7 @@ private fun PlaybackErrorOverlay(
     val backRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
-        retryRequester.requestFocus()
+        retryRequester.requestFocusSafely()
     }
 
     Column(

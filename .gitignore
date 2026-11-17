@@ -9,6 +9,9 @@ captures/
 # Local machine config
 local.properties
 
+# Scratch output (screenshots, ad-hoc logs)
+temp/
+
 # IDE
 .idea/
 *.iml

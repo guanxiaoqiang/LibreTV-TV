@@ -186,6 +186,12 @@ fun aggregate(results: List<SearchResult>): List<TitleGroup> {
                 .thenByDescending { it.quality.rank }
                 .thenBy { if (it.latencyMs > 0L) it.latencyMs else Long.MAX_VALUE }
         )
+            // The same collector can return one title twice (two catalog pages,
+            // or the same API configured under two names). [SourceOffer.key] is
+            // the identity used for the probe map *and* for the LazyColumn in
+            // the source picker, where a duplicate key is a hard crash — so keep
+            // only the best copy of each one.
+            .distinctBy { it.key }
 
         TitleGroup(
             key = key,

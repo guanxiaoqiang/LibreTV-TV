@@ -35,6 +35,29 @@ import androidx.compose.runtime.rememberUpdatedState
  * is what lets a touch user reveal a hidden context action instead of opening
  * the item straight away.
  */
+/**
+ * Ask for the focus without letting a transient composition state kill the app.
+ *
+ * A [FocusRequester] is bound to a node that may not be attached yet when the
+ * request is issued from a [androidx.compose.runtime.LaunchedEffect] that runs
+ * in the very frame the node's `enabled` flag flips — the player root becoming
+ * focusable right after the control panel hides is exactly that case. Compose
+ * then throws `IllegalArgumentException: ActiveParent with no focused child`,
+ * which is fatal on a TV: the viewer just sees the app close.
+ *
+ * A refused request only means "no focus on this frame". Callers retry on the
+ * next key press or the next recomposition, so the failure is swallowed here
+ * instead of being propagated to the main thread.
+ */
+fun FocusRequester.requestFocusSafely(): Boolean = try {
+    requestFocus()
+    true
+} catch (refused: IllegalStateException) {
+    false
+} catch (refused: IllegalArgumentException) {
+    false
+}
+
 @Composable
 fun Modifier.focusableItem(
     enabled: Boolean = true,
