@@ -188,30 +188,37 @@ fun UnifiedPosterCard(
         }
 
         // Two badges per row keeps four metadata tags readable on a 150 dp
-        // card. The title bar below them uses the same chip backing colour.
+        // card. The tags stay chips with their own inset; the title below them
+        // is not a chip — its backing fills the whole caption strip, so the
+        // name reads as one bar under the artwork instead of a floating tag.
         // Every tag has its own switch in the settings, so the block can be
         // trimmed down to just the information the viewer cares about.
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .padding(6.dp),
+                .fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            card.badges
-                .filter { badgeVisibility.allows(it.tag) }
-                .chunked(2)
-                .forEach { row ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        row.forEach { BadgeChip(it) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                card.badges
+                    .filter { badgeVisibility.allows(it.tag) }
+                    .chunked(2)
+                    .forEach { row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            row.forEach { BadgeChip(it) }
+                        }
                     }
-                }
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(if (focused) Color(0xDD241A20) else Color(0xD10B0E13))
-                    .padding(horizontal = 5.dp, vertical = 3.dp)
+                    .background(if (focused) Color(0xF2241A20) else Color(0xF0070A0E))
+                    .padding(horizontal = 8.dp, vertical = 5.dp)
             ) {
                 Text(
                     text = card.title,

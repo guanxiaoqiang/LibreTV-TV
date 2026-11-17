@@ -245,18 +245,10 @@ fun HistoryPage(
     onDelete: (String) -> Unit,
     onClear: () -> Unit,
     leftTarget: FocusRequester? = null,
+    leadTarget: FocusRequester? = null,
     modifier: Modifier = Modifier
 ) {
     val gridState = rememberLazyGridState()
-    // Only the left-most column goes back to the rail slot the viewer came
-    // from; other columns keep their normal in-grid LEFT navigation.
-    val firstColumnIndices: Set<Int> by remember(gridState) {
-        derivedStateOf<Set<Int>> {
-            val visible = gridState.layoutInfo.visibleItemsInfo
-            val leftX = visible.minOfOrNull { it.offset.x } ?: return@derivedStateOf emptySet()
-            visible.filter { it.offset.x == leftX }.map { it.index }.toSet()
-        }
-    }
 
     // The removal entry is hidden by default. A long press on the card or the
     // remote's MENU key opens a small confirmation overlay for that one
@@ -370,16 +362,23 @@ fun HistoryPage(
                 modifier = Modifier.fillMaxSize()
             ) {
                 gridItemsIndexed(records, key = { _, record -> record.key }) { index, record ->
-                    val rail = leftTarget
-                    val toRail = Modifier.focusProperties {
-                        if (rail != null && index in firstColumnIndices) left = rail
-                    }
+                    // LEFT stays inside the grid; BACK is the way back to the
+                    // rail, matching every other content page.
+                    val lead = leadTarget
                     FocusableTile(
                         onClick = { onResume(record) },
                         onLongPress = { pendingDelete = record },
-                        modifier = toRail.onFocusChanged { state ->
-                            if (state.isFocused) focusedKey = record.key
-                        }
+                        modifier = Modifier
+                            .then(
+                                if (lead != null && index == 0) {
+                                    Modifier.focusRequester(lead)
+                                } else {
+                                    Modifier
+                                }
+                            )
+                            .onFocusChanged { state ->
+                                if (state.isFocused) focusedKey = record.key
+                            }
                     ) { focused ->
                         HistoryCard(record = record, focused = focused)
                     }

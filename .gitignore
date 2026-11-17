@@ -16,3 +16,6 @@ temp/
 .idea/
 *.iml
 .DS_Store
+node_modules/
+.codebuddy/
+.agents/

@@ -1,5 +1,6 @@
 package com.libretv.tv
 
+import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -56,6 +58,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,6 +73,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.libretv.tv.data.CmsClient
 import com.libretv.tv.data.DoubanSubject
@@ -98,8 +103,11 @@ import com.libretv.tv.ui.TvColors
 import com.libretv.tv.ui.TvViewModel
 import com.libretv.tv.ui.UiState
 import com.libretv.tv.ui.UnifiedPosterCard
+import com.libretv.tv.ui.requestFocusSafely
 import com.libretv.tv.ui.genres
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -130,7 +138,21 @@ private data class RailEntry(
 )
 
 /** Shared left inset of every content row, aligned with the first grid card. */
-private val ContentStart = 44.dp
+private val ContentStart = 24.dp
+
+/**
+ * The inputs of the infinite-scroll decision.
+ *
+ * They are bundled into one value so the snapshot flow can compare them and
+ * re-evaluate whenever the feed state changes, not only when the grid moves.
+ */
+private data class FeedTrigger(
+    val hasMore: Boolean,
+    val loading: Boolean,
+    val loadingMore: Boolean,
+    val visible: Int,
+    val lastVisible: Int
+)
 
 private fun tabIcon(tab: HomeTab): ImageVector = when (tab) {
     HomeTab.RECOMMEND -> Icons.Filled.ThumbUp
@@ -195,13 +217,12 @@ fun TvApp(vm: TvViewModel = viewModel()) {
         }
     }
 
-    BackHandler(enabled = state.screen != Screen.HOME || state.homeTab != HomeTab.RECOMMEND) {
-        if (state.screen != Screen.HOME) {
-            if (state.screen == Screen.PLAYER) playTarget = null
-            vm.back()
-        } else {
-            vm.setHomeTab(HomeTab.RECOMMEND)
-        }
+    // On the home screen the rail owns the BACK key (see HomeLayout): the
+    // first press returns the focus to the tabs, a second one asks whether
+    // the app should really close. Every other screen goes back as usual.
+    BackHandler(enabled = state.screen != Screen.HOME) {
+        if (state.screen == Screen.PLAYER) playTarget = null
+        vm.back()
     }
 
     when (state.screen) {
@@ -213,6 +234,7 @@ fun TvApp(vm: TvViewModel = viewModel()) {
             onRailFocus = { vm.setRailFocus(it) },
             onSelectGenre = { vm.setGenre(it) },
             onLoadMore = { vm.loadMore() },
+            onScrollPaused = { vm.setFeedPaused(it) },
             onPickDouban = { vm.searchDoubanTitle(it) },
             onPickGroup = { vm.openGroupOrDetail(it, Screen.HOME) },
             onResume = resumeRecord,
@@ -396,6 +418,8 @@ private fun HomeLayout(
     onRailFocus: (Int) -> Unit,
     onSelectGenre: (String) -> Unit,
     onLoadMore: () -> Unit,
+    /** True while the content grid is being scrolled, so new data is held back. */
+    onScrollPaused: (Boolean) -> Unit,
     onPickDouban: (DoubanSubject) -> Unit,
     onPickGroup: (TitleGroup) -> Unit,
     onResume: (WatchRecord) -> Unit,
@@ -403,6 +427,9 @@ private fun HomeLayout(
     onClearHistory: () -> Unit
 ) {
     val tabs = remember { HomeTab.entries.toList() }
+    // The activity behind the composition — the exit question closes it.
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     // The whole navigation lives on the left rail: search, then every home tab
     // in display order, then source management. One requester per entry, with
     // wrap-around up/down, keeps the D-pad cycling inside the rail.
@@ -421,14 +448,50 @@ private fun HomeLayout(
     val railBringers = remember { List(railEntries.size) { BringIntoViewRequester() } }
     val railScroll = rememberScrollState()
 
-    // The rail slot the viewer left last. Both LEFT from the content grid and a
-    // return from another screen use this exact requester, so focus never jumps
-    // to whichever nav item happens to be geometrically closest.
+    // The rail slot the viewer left last. Both a BACK from the content page and
+    // a return from another screen use this exact requester, so focus never
+    // jumps to whichever nav item happens to be geometrically closest.
     val railTargetIndex = state.railFocusIndex.coerceIn(0, railEntries.lastIndex)
     val railTarget = railRequesters[railTargetIndex]
 
+    // Focus hand-off into the content page. Clicking a rail tab bumps the tick;
+    // the content page turns that into a focus request for its own top row.
+    val historyLead = remember { FocusRequester() }
+    var enterContentTick by remember { mutableStateOf(0) }
+
+    // True while any focusable in the right content page holds focus. BACK then
+    // hands focus back to the rail instead of leaving the screen.
+    var contentHasFocus by remember { mutableStateOf(false) }
+
+    // BACK with the focus on the rail asks before the app is closed — closing
+    // a TV app by accident is not recoverable for the viewer.
+    var showExitConfirm by remember { mutableStateOf(false) }
+
+    // BACK inside the content page returns to the left rail — the exact tab
+    // entry the viewer came from — rather than jumping screens. The rail is
+    // only reachable through this gesture, which keeps arrow navigation inside
+    // the grid deterministic.
+    BackHandler(enabled = contentHasFocus) {
+        contentHasFocus = false
+        railTarget.requestFocusSafely()
+    }
+
+    // BACK on the rail: ask first, leave only after the viewer confirms.
+    BackHandler(enabled = !contentHasFocus) {
+        showExitConfirm = true
+    }
+
     LaunchedEffect(Unit) {
         railRequesters[railTargetIndex].requestFocus()
+    }
+
+    // A tab click (OK on a focused rail entry) hands focus to the content page.
+    // The genre chips run their own hand-off (they have to scroll the strip
+    // home first); the history page has no chips, so it does it here.
+    LaunchedEffect(enterContentTick) {
+        if (enterContentTick > 0 && state.homeTab == HomeTab.HISTORY) {
+            historyLead.requestFocusSafely()
+        }
     }
 
     Row(
@@ -441,9 +504,9 @@ private fun HomeLayout(
     ) {
         Column(
             modifier = Modifier
-                // 160 dp = 152 dp rail + 8 dp slack for the 1.05x focus scale,
+                // 124 dp = 116 dp rail + 8 dp slack for the 1.05x focus scale,
                 // so the enlarged nav tile is not clipped by the scroll view.
-                .width(160.dp)
+                .width(124.dp)
                 .verticalScroll(railScroll)
                 .padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(5.dp)
@@ -462,7 +525,14 @@ private fun HomeLayout(
                         when {
                             entry.action == 0 -> onSearch()
                             entry.action == 1 -> onSources()
-                            entry.tab != null -> onSelectTab(entry.tab)
+                            // Clicking a tab does two things: switch the content
+                            // page, and hand focus to its top chip strip. BACK
+                            // from there returns to this exact rail slot.
+                            entry.tab != null -> {
+                                onRailFocus(index)
+                                onSelectTab(entry.tab)
+                                enterContentTick++
+                            }
                         }
                     },
                     scaleWhenFocused = 1.05f,
@@ -496,9 +566,17 @@ private fun HomeLayout(
         // Breathing room between the rail and the first grid column: a focused
         // card grows ~9% in every direction, so it needs clear space on the
         // left as well as above the first row.
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(8.dp))
 
-        Column(modifier = Modifier.weight(1f).fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxSize()
+                // hasFocus covers every focusable below (chips, cards, header
+                // buttons): while any of them is focused, BACK belongs to the
+                // content page and returns to the rail.
+                .onFocusChanged { contentHasFocus = it.hasFocus }
+        ) {
             if (state.homeTab == HomeTab.HISTORY) {
                 HistoryPage(
                     records = state.history,
@@ -506,19 +584,145 @@ private fun HomeLayout(
                     onDelete = onDeleteHistory,
                     onClear = onClearHistory,
                     leftTarget = railTarget,
+                    leadTarget = historyLead,
                     modifier = Modifier.weight(1f)
                 )
             } else {
                 HomeFeedPage(
                     state = state,
                     leftTarget = railTarget,
+                    focusLeadTick = enterContentTick,
                     onSelectGenre = onSelectGenre,
                     onPickGroup = onPickGroup,
                     onPickDouban = onPickDouban,
-                    onLoadMore = onLoadMore
+                    onLoadMore = onLoadMore,
+                    onScrollPaused = onScrollPaused
                 )
             }
         }
+    }
+
+    // The exit question lives in its own window, so it covers the whole app
+    // and keeps the focus inside itself.
+    if (showExitConfirm) {
+        ExitConfirmDialog(
+            onConfirm = {
+                showExitConfirm = false
+                (context as? Activity)?.finish()
+            },
+            onCancel = {
+                showExitConfirm = false
+                // The dialog window needs a moment to close before the focus
+                // can move back to the rail.
+                scope.launch {
+                    delay(160)
+                    railTarget.requestFocusSafely()
+                }
+            }
+        )
+    }
+}
+
+/**
+ * Asks before the app is closed.
+ *
+ * On a TV the remote's BACK key is muscle memory, so closing the app by
+ * accident has to be impossible: the safe choice keeps the focus and only an
+ * explicit confirmation leaves.
+ */
+@Composable
+private fun ExitConfirmDialog(
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val cancelRequester = remember { FocusRequester() }
+    val confirmRequester = remember { FocusRequester() }
+
+    // BACK inside the question dismisses it instead of closing the app.
+    BackHandler { onCancel() }
+
+    LaunchedEffect(Unit) {
+        cancelRequester.requestFocusSafely()
+    }
+
+    Dialog(
+        onDismissRequest = { onCancel() },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xE6000000)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(460.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(TvColors.Surface)
+                    .border(1.dp, TvColors.SurfaceHigh, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 28.dp, vertical = 26.dp)
+            ) {
+                Text(
+                    "退出应用？",
+                    color = TvColors.OnSurface,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "确认后 LibreTV-TV 会退出，已保存的观看记录不会丢失。",
+                    color = TvColors.OnSurfaceMuted,
+                    fontSize = 14.sp
+                )
+                Spacer(Modifier.height(26.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FocusableTile(
+                        onClick = onCancel,
+                        scaleWhenFocused = 1.04f,
+                        modifier = Modifier
+                            .focusRequester(cancelRequester)
+                            .focusProperties { right = confirmRequester }
+                    ) { focused ->
+                        ExitDialogButton("取消", focused)
+                    }
+                    FocusableTile(
+                        onClick = onConfirm,
+                        scaleWhenFocused = 1.04f,
+                        modifier = Modifier
+                            .focusRequester(confirmRequester)
+                            .focusProperties { left = cancelRequester }
+                    ) { focused ->
+                        ExitDialogButton("确认退出", focused, danger = true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One button of the exit question. */
+@Composable
+private fun ExitDialogButton(label: String, focused: Boolean, danger: Boolean = false) {
+    val accent = if (danger) TvColors.Danger else TvColors.Primary
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (focused) accent.copy(alpha = 0.22f) else TvColors.SurfaceHigh)
+            .border(
+                width = if (focused) 2.dp else 1.dp,
+                color = if (focused) accent else TvColors.SurfaceHigh,
+                shape = RoundedCornerShape(10.dp)
+            )
+            .padding(horizontal = 26.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (focused) accent else TvColors.OnSurfaceMuted,
+            fontSize = 15.sp,
+            fontWeight = if (focused) FontWeight.Medium else FontWeight.Normal
+        )
     }
 }
 
@@ -531,10 +735,12 @@ private fun HomeLayout(
 private fun HomeFeedPage(
     state: UiState,
     leftTarget: FocusRequester?,
+    focusLeadTick: Int,
     onSelectGenre: (String) -> Unit,
     onPickGroup: (TitleGroup) -> Unit,
     onPickDouban: (DoubanSubject) -> Unit,
-    onLoadMore: () -> Unit
+    onLoadMore: () -> Unit,
+    onScrollPaused: (Boolean) -> Unit
 ) {
     val genres = remember(state.homeTab) { state.homeTab.genres() }
     val chipRequesters = remember(genres.size) { List(genres.size) { FocusRequester() } }
@@ -557,34 +763,48 @@ private fun HomeFeedPage(
         }
     }
 
-    // Only the left-most column is wired back to the rail; every other card
-    // keeps normal grid D-pad navigation (LEFT moves one column inward).
-    // Reading the live layout means the binding follows the scroll position
-    // instead of pointing at a recycled, detached item.
-    val firstColumnIndices: Set<Int> by remember(gridState) {
-        derivedStateOf<Set<Int>> {
-            val visible = gridState.layoutInfo.visibleItemsInfo
-            val leftX = visible.minOfOrNull { it.offset.x } ?: return@derivedStateOf emptySet()
-            visible.filter { it.offset.x == leftX }.map { it.index }.toSet()
-        }
-    }
-
     // A tab / genre switch always starts at the top of its own grid.
     LaunchedEffect(state.homeTab, state.genre) {
         gridState.scrollToItem(0)
     }
 
-    // Infinite scroll: read the newest state from inside a single long-lived
-    // flow instead of restarting the collector on every recomposition.
+    // While the viewer scrolls, fresh feed data is held back (see
+    // TvViewModel.setFeedPaused): publishing a new card list mid-scroll forces
+    // the grid to rebuild and hitch. The flush happens the moment scrolling
+    // stops.
+    val latestPaused by rememberUpdatedState(onScrollPaused)
+    LaunchedEffect(gridState) {
+        snapshotFlow { gridState.isScrollInProgress }
+            .distinctUntilChanged()
+            .collect { paused -> latestPaused(paused) }
+    }
+
+    // Leaving the page (history tab, search, player) cancels the collector
+    // above, so the hold-back has to be released with it — otherwise the next
+    // page would wait for data that is never committed.
+    DisposableEffect(Unit) {
+        onDispose { latestPaused(false) }
+    }
+
+    // Infinite scroll: re-evaluated whenever the layout *or* the feed state
+    // changes. Reading the state inside the flow is what makes a freshly
+    // landed card list ask for the next page even when the visible items did
+    // not move.
     val latestState by rememberUpdatedState(state)
     val latestLoadMore by rememberUpdatedState(onLoadMore)
     LaunchedEffect(gridState) {
         snapshotFlow {
-            gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        }.collect { last ->
             val s = latestState
-            if (s.feedHasMore && !s.feedLoading && !s.feedLoadingMore &&
-                s.feedVisible > 0 && last >= s.feedVisible - 6
+            FeedTrigger(
+                hasMore = s.feedHasMore,
+                loading = s.feedLoading,
+                loadingMore = s.feedLoadingMore,
+                visible = s.feedVisible,
+                lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            )
+        }.distinctUntilChanged().collect { t ->
+            if (t.hasMore && !t.loading && !t.loadingMore && t.visible > 0 &&
+                t.lastVisible >= t.visible - 6
             ) {
                 latestLoadMore()
             }
@@ -598,6 +818,7 @@ private fun HomeFeedPage(
             current = state.genre,
             requesters = chipRequesters,
             leftTarget = leftTarget,
+            focusLeadTick = focusLeadTick,
             onSelect = onSelectGenre,
             onFocused = { lastChipIndex = it }
         )
@@ -634,11 +855,11 @@ private fun HomeFeedPage(
                 // DOWN from a chip is left to Compose's 2D focus search, which
                 // already picks the nearest card below. UP is explicit so the
                 // viewer returns to the chip they originally left.
+                // LEFT is deliberately unbound: arrow keys never leave the grid
+                // for the rail — BACK is the only way back to the tabs.
                 val upTarget = upChip
-                val railTarget = leftTarget
                 val navigationModifier = Modifier.focusProperties {
                     if (upTarget != null && index in firstRowIndices) up = upTarget
-                    if (railTarget != null && index in firstColumnIndices) left = railTarget
                 }
                 FocusableTile(
                     onClick = {
@@ -657,9 +878,22 @@ private fun HomeFeedPage(
                     )
                 }
             }
+            // The hint at the very bottom of the grid: it tells the viewer
+            // that more is coming and that the new cards are appended below.
             if (state.feedLoadingMore || (state.feedLoading && state.feed.isNotEmpty())) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    FeedLoadingFooter("正在加载下一批…")
+                    FeedLoadingFooter("正在加载更多…")
+                }
+            } else if (state.feedRefreshing) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    FeedLoadingFooter("正在更新…")
+                }
+            } else if (state.feedVisible < state.feed.size) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    FeedLoadingFooter(
+                        "继续下滑加载更多 · 还有 ${state.feed.size - state.feedVisible} 部",
+                        spinning = false
+                    )
                 }
             } else if (!state.feedHasMore && state.feed.isNotEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
@@ -678,35 +912,21 @@ private fun FeedHeader(state: UiState) {
             .fillMaxWidth()
             .padding(start = ContentStart, end = 40.dp, top = 8.dp, bottom = 12.dp)
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                "${state.homeTab.label} · ${state.genre}",
-                color = TvColors.OnSurface,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(Modifier.height(3.dp))
-            Text(
-                state.feedNote.ifBlank { "选择上方类型，网格向下浏览" },
-                color = TvColors.OnSurfaceMuted,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
+        Text(
+            "${state.homeTab.label} · ${state.genre}",
+            color = TvColors.OnSurface,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f)
+        )
         Spacer(Modifier.width(14.dp))
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(TvColors.Surface)
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-        ) {
-            Text(
-                "${state.feedVisible}/${state.feed.size} 部",
-                color = TvColors.OnSurfaceMuted,
-                fontSize = 12.sp
-            )
-        }
+        // Plain text on purpose: a boxed count read as a button on a TV, and
+        // viewers kept trying to focus it.
+        Text(
+            "${state.feedVisible}/${state.feed.size} 部",
+            color = TvColors.OnSurfaceMuted,
+            fontSize = 12.sp
+        )
     }
 }
 
@@ -716,6 +936,7 @@ private fun GenreStrip(
     current: String,
     requesters: List<FocusRequester>,
     leftTarget: FocusRequester?,
+    focusLeadTick: Int,
     onSelect: (String) -> Unit,
     onFocused: (Int) -> Unit
 ) {
@@ -727,6 +948,26 @@ private fun GenreStrip(
             stripState.layoutInfo.visibleItemsInfo.minOfOrNull { it.index } ?: 0
         }
     }
+
+    // A new tab starts at its first category, and the strip goes back to the
+    // beginning with it — otherwise the viewer would land on a chip of the
+    // previous tab's scroll position.
+    LaunchedEffect(genres) {
+        stripState.scrollToItem(0)
+    }
+
+    // The hand-off from a rail tab click: focus lands on the first category
+    // chip of the freshly switched page. The strip is scrolled home first and
+    // one frame is awaited, because the chip only becomes focusable once it
+    // has been composed.
+    LaunchedEffect(focusLeadTick) {
+        if (focusLeadTick > 0) {
+            stripState.scrollToItem(0)
+            withFrameNanos { }
+            requesters.getOrNull(0)?.requestFocusSafely()
+        }
+    }
+
     LazyRow(
         state = stripState,
         // Vertical padding keeps focused chips (1.06x scale) inside the row and

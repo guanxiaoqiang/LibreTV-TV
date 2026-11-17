@@ -91,9 +91,9 @@ fun NavItem(
     val shape = RoundedCornerShape(10.dp)
     Box(
         modifier = modifier
-            // Narrower rail: the old 178 dp column pushed the content grid too
+            // Narrower rail: the old 152 dp column pushed the content grid too
             // far right and wasted a lot of TV width on empty label space.
-            .width(152.dp)
+            .width(116.dp)
             .height(42.dp)
             .clip(shape)
             .background(if (focused) TvColors.SurfaceHigh else Color.Transparent)
@@ -106,7 +106,7 @@ fun NavItem(
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(start = 12.dp, end = 10.dp),
+                .padding(start = 10.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(

@@ -12,6 +12,7 @@ import com.libretv.tv.data.CmsClient
 import com.libretv.tv.data.DetailBundle
 import com.libretv.tv.data.DoubanClient
 import com.libretv.tv.data.DoubanSubject
+import com.libretv.tv.data.FeedCacheDb
 import com.libretv.tv.data.OfferProbe
 import com.libretv.tv.data.PlayRequest
 import com.libretv.tv.data.SearchHistoryStore
@@ -28,12 +29,14 @@ import com.libretv.tv.data.SourceStore
 import com.libretv.tv.data.VodClass
 import com.libretv.tv.data.WatchHistoryStore
 import com.libretv.tv.data.WatchRecord
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -106,6 +109,11 @@ data class UiState(
     val feedVisible: Int = 0,
     val feedLoading: Boolean = false,
     val feedLoadingMore: Boolean = false,
+    /**
+     * A background refresh of the strip is running. The cached cards stay on
+     * screen while it works, so the grid only shows a quiet "正在更新…" hint.
+     */
+    val feedRefreshing: Boolean = false,
     val feedHasMore: Boolean = true,
     val feedNote: String = "",
     val feedTotalItems: Int = 0,
@@ -130,11 +138,31 @@ private const val MAX_SOURCE_PAGE = 3
 private const val MAX_DOUBAN_START = 100
 
 /**
+ * How long a tab must stay on screen before its strip is refreshed.
+ *
+ * The cached strip is painted immediately, so the viewer never waits for the
+ * network. The refresh is delayed a moment on purpose: browsing with the
+ * D-pad walks through several tabs in a second, and a fan-out request per
+ * arrow press would waste bandwidth and fight the cached grid. A tab that is
+ * actually watched gets fresh data half a second later.
+ */
+private const val FEED_REFRESH_DELAY_MS = 500L
+
+/**
+ * Upper bound for the scroll hold-back.
+ *
+ * New cards wait for the grid to settle while the viewer scrolls, but never
+ * longer than this: a page that leaves the composition mid-scroll cannot
+ * report "stopped" any more, and the next page must not wait for it.
+ */
+private const val PAUSE_HOLD_MAX_MS = 2_000L
+
+/**
  * Everything needed to resume a (tab, genre) strip: the deduplicated raw
  * results (so later source pages can re-aggregate with earlier ones), the
  * already built cards, and the cursors for the two possible load-more paths.
  */
-private data class FeedSnapshot(
+internal data class FeedSnapshot(
     val cards: List<FeedCard>,
     val rawResults: List<SearchResult>,
     val seenResultKeys: Set<String>,
@@ -218,6 +246,8 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     private val sourceStore = SourceStore(app)
     val historyStore = WatchHistoryStore(app)
     private val searchHistoryStore = SearchHistoryStore(app)
+    /** The strips of the home tabs, kept in a local database across restarts. */
+    private val feedDb = FeedCacheDb(app)
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -230,6 +260,14 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     private val feedCache = mutableMapOf<String, FeedSnapshot>()
     /** Only the newest strip is allowed to publish into [UiState]. */
     private var activeFeedKey: String = ""
+
+    /**
+     * True while the grid is scrolling: publishes are held back so the list
+     * never rebuilds mid-gesture. See [setFeedPaused].
+     */
+    private var feedPaused: Boolean = false
+    private var pendingPublish: PendingPublish? = null
+    private var pauseFlushJob: Job? = null
 
     /** pinyin-initial -> Chinese title, so a TV remote alone can reach a title. */
     private var titleIndex: Map<String, String> = emptyMap()
@@ -260,7 +298,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         }
         // The recommend strip does not depend on the category trees.
         val first = HomeTab.RECOMMEND.genres().first()
-        startFeed(HomeTab.RECOMMEND, first, reset = true)
+        openFeed(HomeTab.RECOMMEND, first)
     }
 
     // ---------- home tabs, genre chips & segmented grid ----------
@@ -298,36 +336,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             )
             return
         }
-        val key = feedKey(tab, genre.label)
-        activeFeedKey = key
-        // Re-entering a cached tab must not blank the grid and start a fresh
-        // network round: that produced a visible flash on every D-pad move.
-        val cached = feedCache[key]
-        if (cached != null) {
-            _state.value = _state.value.copy(
-                homeTab = tab,
-                genre = genre.label,
-                feedLoading = false,
-                feedLoadingMore = false,
-                feedTotalTargets = 0
-            )
-            publish(key, cached, minOf(FEED_PAGE_SIZE, cached.cards.size), false, false)
-            return
-        }
-        _state.value = _state.value.copy(
-            homeTab = tab,
-            genre = genre.label,
-            feed = emptyList(),
-            feedVisible = 0,
-            feedLoading = true,
-            feedLoadingMore = false,
-            feedHasMore = true,
-            feedNote = "",
-            feedTotalItems = 0,
-            feedDoneTargets = 0,
-            feedTotalTargets = 0
-        )
-        selectGenreInternal(tab, genre)
+        openFeed(tab, genre)
     }
 
     fun setGenre(label: String) {
@@ -335,104 +344,156 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         if (tab == HomeTab.HISTORY || _state.value.genre == label) return
         val genre = tab.genres().firstOrNull { it.label == label } ?: return
         feedJob?.cancel()
+        openFeed(tab, genre)
+    }
+
+    /**
+     * Show the strip of (tab, genre) as fast as possible, then refresh it.
+     *
+     * Two caches work together here. The in-memory one keeps the strips the
+     * viewer already saw in this session; the local database keeps them
+     * across restarts. Either way the cards are on screen before the network
+     * answers.
+     *
+     * The refresh runs after [FEED_REFRESH_DELAY_MS]: the viewer browses with
+     * the D-pad and only a tab that is actually watched deserves a fan-out
+     * request. The refresh never blanks the grid — the cached cards stay
+     * visible until the new strip is complete.
+     */
+    private fun openFeed(tab: HomeTab, genre: HomeGenre) {
         val key = feedKey(tab, genre.label)
         activeFeedKey = key
-        val cached = feedCache[key]
-        if (cached != null) {
-            _state.value = _state.value.copy(
-                genre = label,
-                feedLoading = false,
-                feedLoadingMore = false,
-                feedTotalTargets = 0
-            )
-            publish(key, cached, minOf(FEED_PAGE_SIZE, cached.cards.size), false, false)
-            return
-        }
+        // A new page must never wait for a hold-back that belongs to the page
+        // the viewer just left.
+        releasePause()
         _state.value = _state.value.copy(
-            genre = label,
-            feed = emptyList(),
-            feedVisible = 0,
-            feedLoading = true,
+            homeTab = tab,
+            genre = genre.label,
             feedLoadingMore = false,
-            feedHasMore = true,
-            feedNote = "",
-            feedTotalItems = 0,
-            feedDoneTargets = 0,
+            feedRefreshing = false,
             feedTotalTargets = 0
         )
-        selectGenreInternal(tab, genre)
-    }
-
-    private fun selectGenreInternal(tab: HomeTab, genre: HomeGenre) {
-        val key = feedKey(tab, genre.label)
         val cached = feedCache[key]
         if (cached != null) {
-            feedJob?.cancel()
-            activeFeedKey = key
-            publish(key, cached, minOf(FEED_PAGE_SIZE, cached.cards.size), false, false)
-            return
-        }
-        if (tab == HomeTab.RECOMMEND || _state.value.categoryCatalogReady) {
-            startFeed(tab, genre, reset = true)
+            // Re-entering a cached tab must not blank the grid and start a
+            // fresh network round: that produced a visible flash on every
+            // D-pad move.
+            publish(key, cached, minOf(FEED_PAGE_SIZE, cached.cards.size), false, false, persist = false)
         } else {
-            // Category trees are still loading; init will start this strip.
-            feedJob?.cancel()
-            activeFeedKey = key
-        }
-    }
-
-    private fun startFeed(tab: HomeTab, genre: HomeGenre, reset: Boolean) {
-        feedJob?.cancel()
-        val key = feedKey(tab, genre.label)
-        activeFeedKey = key
-        if (reset) {
             _state.value = _state.value.copy(
-                feedLoading = true,
-                feedLoadingMore = false,
                 feed = emptyList(),
                 feedVisible = 0,
+                feedLoading = true,
                 feedHasMore = true,
-                feedNote = "正在加载「${genre.label}」…"
+                feedNote = "正在加载「${genre.label}」…",
+                feedTotalItems = 0,
+                feedDoneTargets = 0
             )
         }
         feedJob = viewModelScope.launch {
-            if (tab == HomeTab.RECOMMEND) {
-                loadDoubanPage(tab, genre, 0, append = false, key = key)
-            } else {
-                loadCategoryPage(tab, genre, 1, append = false, key = key)
+            if (feedCache[key] == null) {
+                val stored = feedDb.read(key)
+                if (stored != null && isActive(key)) {
+                    val snapshot = stored.toSnapshot()
+                    feedCache[key] = snapshot
+                    publish(
+                        key,
+                        snapshot,
+                        minOf(FEED_PAGE_SIZE, snapshot.cards.size),
+                        false,
+                        false,
+                        persist = false
+                    )
+                }
             }
+            delay(FEED_REFRESH_DELAY_MS)
+            if (!isActive(key)) return@launch
+            refreshFeed(tab, genre, key)
         }
     }
 
     /**
-     * Called by the grid when focus is close to the last visible card.
+     * Re-read one strip from the network without disturbing the grid.
      *
-     * First it reveals another local segment (no network at all); only when
-     * every already-loaded card is on screen does it fetch the next page of
-     * source results / Douban recommendations.
+     * The cached cards stay on screen while the collectors answer; only when
+     * the new strip is complete does it replace the old one. That keeps the
+     * grid stable for a viewer who is already scrolling.
+     */
+    private suspend fun refreshFeed(tab: HomeTab, genre: HomeGenre, key: String) {
+        val previous = feedCache[key]
+        _state.value = _state.value.copy(feedRefreshing = true)
+        try {
+            if (tab == HomeTab.RECOMMEND) {
+                loadDoubanPage(tab, genre, 0, append = false, key = key, quiet = true)
+            } else {
+                loadCategoryPage(tab, genre, 1, append = false, key = key, quiet = true)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A failed round must not blank the strip the cache had painted.
+            return
+        } finally {
+            // The flag must also go down when the round was cancelled —
+            // otherwise the infinite scroll stays blocked for the rest of the
+            // session.
+            _state.value = _state.value.copy(feedRefreshing = false)
+        }
+        if (previous != null && previous.cards.isNotEmpty() && _state.value.feed.isEmpty()) {
+            publish(
+                key,
+                previous,
+                refreshVisible(previous.cards.size),
+                false,
+                false,
+                persist = false
+            )
+        }
+    }
+
+    /**
+     * Called by the grid when the viewer reaches the bottom of the list.
+     *
+     * Two things happen at once: the cards that are already loaded are
+     * revealed (that costs no network), and the next page of source results /
+     * Douban recommendations is fetched. The new cards are appended below the
+     * ones already on screen — the list is never rebuilt or re-sorted.
      */
     fun loadMore() {
         val s = _state.value
+        // A background refresh must not block the viewer: the append below
+        // replaces it. The refresh flag is not a reason to sit still at the
+        // bottom of the grid.
         if (s.feedLoading || s.feedLoadingMore || !s.feedHasMore ||
             s.homeTab == HomeTab.HISTORY
         ) return
         val key = activeFeedKey
         val snapshot = feedCache[key] ?: return
         if (s.feedVisible < s.feed.size) {
+            // Already loaded cards: show them right away.
             _state.value = s.copy(
                 feedVisible = minOf(s.feedVisible + FEED_PAGE_SIZE, s.feed.size)
             )
-            return
         }
         val tab = s.homeTab
         val genre = tab.genres().firstOrNull { it.label == s.genre } ?: return
-        _state.value = s.copy(feedLoadingMore = true)
+        // Keep the reveal above: the state is read again so the freshly
+        // revealed cards are not dropped by the loading flag.
+        _state.value = _state.value.copy(feedLoadingMore = true)
         feedJob?.cancel()
         feedJob = viewModelScope.launch {
-            if (tab == HomeTab.RECOMMEND) {
-                loadDoubanPage(tab, genre, snapshot.nextDoubanStart, append = true, key = key)
-            } else {
-                loadCategoryPage(tab, genre, snapshot.nextSourcePage, append = true, key = key)
+            try {
+                if (tab == HomeTab.RECOMMEND) {
+                    loadDoubanPage(tab, genre, snapshot.nextDoubanStart, append = true, key = key)
+                } else {
+                    loadCategoryPage(tab, genre, snapshot.nextSourcePage, append = true, key = key)
+                }
+            } finally {
+                // The hint at the bottom of the grid must never stick: a
+                // failed round has to release the grid again.
+                if (isActive(key)) {
+                    _state.value = _state.value.copy(feedLoadingMore = false)
+                }
             }
         }
     }
@@ -443,7 +504,8 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         genre: HomeGenre,
         pageStart: Int,
         append: Boolean,
-        key: String
+        key: String,
+        quiet: Boolean = false
     ) {
         var subjects = withContext(Dispatchers.IO) {
             douban.recommendations(genre.doubanTag, DOUBAN_PAGE_SIZE, tab.doubanType, pageStart)
@@ -456,16 +518,22 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         if (!isActive(key)) return
-        val old = if (append) feedCache[key] else null
+        // Same rule as the source pages: continue from the strip that is
+        // already on screen and only append.
+        val old = feedCache[key]
         val seen = old?.seenDoubanIds.orEmpty().toMutableSet()
         val fresh = subjects.filter { seen.add(it.id.ifBlank { it.title }) }
         val cards = (old?.cards.orEmpty() + fresh.map { doubanCard(it) })
             .distinctBy { it.key }
-        val nextStart = pageStart + DOUBAN_PAGE_SIZE
-        val hasMore = fresh.isNotEmpty() &&
+        // The cursor only moves forward, a refresh never rewinds it.
+        val nextStart = maxOf(pageStart + DOUBAN_PAGE_SIZE, old?.nextDoubanStart ?: 0)
+        val computedHasMore = fresh.isNotEmpty() &&
             subjects.size >= DOUBAN_PAGE_SIZE / 2 &&
             nextStart <= MAX_DOUBAN_START &&
             cards.size < 160
+        // A quiet refresh must not take the paging away from a strip that
+        // still has more pages.
+        val hasMore = if (quiet) old?.hasMore ?: computedHasMore else computedHasMore
         val snapshot = FeedSnapshot(
             cards = cards,
             rawResults = emptyList(),
@@ -478,11 +546,25 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         )
         val visible = if (append) {
             minOf(cards.size, _state.value.feedVisible + FEED_PAGE_SIZE)
+        } else if (quiet) {
+            // A refresh must not move the grid under the viewer's finger.
+            refreshVisible(cards.size)
         } else {
             minOf(FEED_PAGE_SIZE, cards.size)
         }
         publish(key, snapshot, visible, false, false)
     }
+
+    /**
+     * How many cards stay visible after a background refresh.
+     *
+     * The viewer may already be deep in the grid when the refresh lands.
+     * Keeping the current scroll depth avoids a jump back to the top.
+     */
+    private fun refreshVisible(cardCount: Int): Int = minOf(
+        cardCount,
+        maxOf(_state.value.feedVisible, minOf(FEED_PAGE_SIZE, cardCount))
+    )
 
     /** All-source fan-out for one tab + genre, one source page at a time. */
     private suspend fun loadCategoryPage(
@@ -490,18 +572,24 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         genre: HomeGenre,
         page: Int,
         append: Boolean,
-        key: String
+        key: String,
+        quiet: Boolean = false
     ) {
         val (targets, keywordFilter) = targetsFor(tab, genre)
         if (!isActive(key)) return
-        _state.value = _state.value.copy(
-            feedTotalTargets = targets.size,
-            feedDoneTargets = 0,
-            feedNote = if (targets.isEmpty()) "没有匹配的子分类，正在读取豆瓣推荐…"
-            else "正在汇总 ${targets.size} 个采集源的「${genre.label}」片单…"
-        )
+        if (!quiet) {
+            _state.value = _state.value.copy(
+                feedTotalTargets = targets.size,
+                feedDoneTargets = 0,
+                feedNote = if (targets.isEmpty()) "没有匹配的子分类，正在读取豆瓣推荐…"
+                else "正在汇总 ${targets.size} 个采集源的「${genre.label}」片单…"
+            )
+        }
 
-        val old = if (append) feedCache[key] else null
+        // The strip is append-only: every round continues from what is already
+        // on screen and only adds to it. Rebuilding the whole list from scratch
+        // re-sorts the grid and reads as a global refresh on a TV.
+        val old = feedCache[key]
         val raw = old?.rawResults.orEmpty().toMutableList()
         val seen = old?.seenResultKeys.orEmpty().toMutableSet()
         // The head of the grid is fixed once it has been shown. Every later
@@ -541,16 +629,19 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 raw.addAll(part.filter { seen.add("${it.sourceUrl}|${it.item.vodId}") })
                 done++
-                val snapshot = buildSnapshot(
-                    genre, raw, seen, old, keywordFilter, page, stableCards
-                )
+                // Aggregation is CPU work (grouping + sorting hundreds of
+                // entries per collector answer); keep it off the main thread
+                // so the grid stays responsive while a round is in flight.
+                val snapshot = withContext(Dispatchers.Default) {
+                    buildSnapshot(genre, raw, seen, old, keywordFilter, page, stableCards)
+                }
                 stableCards = snapshot.cards
                 // Publish only while the visible first screen is still filling.
                 // Once it is full, keep aggregating in the background and do a
                 // single final publish — no repeated rebuild of the head cards.
                 // feedLoading stays true until the round completes so the
                 // infinite-scroll trigger cannot cancel this job mid-flight.
-                if (!append) {
+                if (!append && !quiet) {
                     val desired = minOf(FEED_PAGE_SIZE, snapshot.cards.size)
                     if (desired > publishedVisible) {
                         publishedVisible = desired
@@ -570,10 +661,19 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
 
         // One, and only one, metadata refresh after the round: merge the extra
         // sources into existing groups while keeping their slots untouched.
-        var snapshot = buildSnapshot(
-            genre, raw, seen, old, keywordFilter, page, stableCards,
-            refreshExisting = true
-        )
+        // An appending round never touches the cards that are already on
+        // screen — it only adds new ones below them.
+        var snapshot = withContext(Dispatchers.Default) {
+            buildSnapshot(
+                genre, raw, seen, old, keywordFilter, page, stableCards,
+                refreshExisting = !append
+            )
+        }
+        // A quiet refresh must never take the paging away from a strip that
+        // still has more pages.
+        if (quiet && !snapshot.hasMore && old?.hasMore == true) {
+            snapshot = snapshot.copy(hasMore = true)
+        }
         // When a collector has no such sub-category, Douban still gives the
         // chip a meaningful grid (e.g. 美剧 / 英剧 / 韩剧).
         if (snapshot.cards.size < 12 && !append) {
@@ -581,6 +681,9 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         }
         val visible = if (append) {
             minOf(snapshot.cards.size, _state.value.feedVisible + FEED_PAGE_SIZE)
+        } else if (quiet) {
+            // A refresh must not move the grid under the viewer's finger.
+            refreshVisible(snapshot.cards.size)
         } else {
             minOf(FEED_PAGE_SIZE, snapshot.cards.size)
         }
@@ -625,14 +728,18 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             refreshExisting = refreshExisting
         )
 
+        // The paging cursor only ever moves forward: a background refresh of a
+        // strip that already loaded page 3 must not send the grid back to
+        // page 2.
+        val nextPage = maxOf(page + 1, old?.nextSourcePage ?: 0)
         return FeedSnapshot(
             cards = cards,
             rawResults = raw.toList(),
             seenResultKeys = seen,
             seenDoubanIds = old?.seenDoubanIds.orEmpty(),
-            nextSourcePage = page + 1,
+            nextSourcePage = nextPage,
             nextDoubanStart = old?.nextDoubanStart ?: 0,
-            hasMore = page < MAX_SOURCE_PAGE && raw.isNotEmpty(),
+            hasMore = nextPage <= MAX_SOURCE_PAGE && raw.isNotEmpty(),
             totalItems = raw.size
         )
     }
@@ -662,7 +769,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         return snapshot.copy(
             cards = (snapshot.cards + fresh.map { doubanCard(it) }).distinctBy { it.key },
             seenDoubanIds = seen.toSet(),
-            nextDoubanStart = DOUBAN_PAGE_SIZE
+            nextDoubanStart = maxOf(snapshot.nextDoubanStart, DOUBAN_PAGE_SIZE)
         )
     }
 
@@ -753,10 +860,52 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         visible: Int,
         loading: Boolean,
         loadingMore: Boolean,
-        doneTargets: Int = 0
+        doneTargets: Int = 0,
+        persist: Boolean = true
     ) {
         if (!isActive(key)) return
         feedCache[key] = snapshot
+        // While the grid is being scrolled, a new card list would force the
+        // LazyGrid to rebuild mid-gesture and hitch the frame. Hold the strip
+        // back and commit it the moment the viewer stops scrolling.
+        if (feedPaused) {
+            // The flags must stay current even while the cards are held back:
+            // a stale "loading" flag would block the infinite scroll and leave
+            // an empty grid behind.
+            _state.value = _state.value.copy(
+                feedLoading = loading,
+                feedLoadingMore = loadingMore,
+                feedHasMore = snapshot.hasMore,
+                feedTotalItems = snapshot.totalItems,
+                feedDoneTargets = doneTargets
+            )
+            pendingPublish = PendingPublish(key, snapshot, visible, loading, loadingMore, doneTargets, persist)
+            return
+        }
+        publishNow(key, snapshot, visible, loading, loadingMore, doneTargets, persist)
+    }
+
+    /** The paused publish, flushed as-is once scrolling stops. */
+    private data class PendingPublish(
+        val key: String,
+        val snapshot: FeedSnapshot,
+        val visible: Int,
+        val loading: Boolean,
+        val loadingMore: Boolean,
+        val doneTargets: Int,
+        val persist: Boolean
+    )
+
+    private fun publishNow(
+        key: String,
+        snapshot: FeedSnapshot,
+        visible: Int,
+        loading: Boolean,
+        loadingMore: Boolean,
+        doneTargets: Int,
+        persist: Boolean
+    ) {
+        if (!isActive(key)) return
         val tab = _state.value.homeTab
         val note = if (tab == HomeTab.RECOMMEND) {
             "豆瓣「${_state.value.genre}」· 已加载 ${snapshot.cards.size} 部 · " +
@@ -775,6 +924,63 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
             feedTotalItems = snapshot.totalItems,
             feedNote = note,
             feedDoneTargets = doneTargets
+        )
+        // A finished strip is written to the local database, so the next start
+        // and the next tab switch paint cards without touching the network.
+        if (persist && !loading) {
+            viewModelScope.launch {
+                feedDb.write(snapshot.toCachedFeed(key, System.currentTimeMillis()))
+            }
+        }
+    }
+
+    /**
+     * Pause / resume UI publication of feed data.
+     *
+     * The grid sets this while it is being scrolled. Aggregation keeps running
+     * in the background — the work is never wasted — but the new cards are
+     * committed only after the gesture ends, so the list never rebuilds under
+     * the viewer's finger.
+     */
+    fun setFeedPaused(paused: Boolean) {
+        if (feedPaused == paused) return
+        feedPaused = paused
+        pauseFlushJob?.cancel()
+        pauseFlushJob = null
+        if (paused) {
+            // Safety net: a page that leaves the composition while it is being
+            // scrolled never reports "stopped" again, so the hold-back has to
+            // expire on its own. Without it the next tab would wait for data
+            // that is never committed.
+            pauseFlushJob = viewModelScope.launch {
+                delay(PAUSE_HOLD_MAX_MS)
+                releasePause()
+            }
+        } else {
+            flushPendingPublish()
+        }
+    }
+
+    /** Drop the hold-back and commit whatever was waiting. */
+    private fun releasePause() {
+        pauseFlushJob?.cancel()
+        pauseFlushJob = null
+        feedPaused = false
+        flushPendingPublish()
+    }
+
+    /** Commit the held-back strip, if there is one. */
+    private fun flushPendingPublish() {
+        val pending = pendingPublish ?: return
+        pendingPublish = null
+        publishNow(
+            pending.key,
+            pending.snapshot,
+            pending.visible,
+            pending.loading,
+            pending.loadingMore,
+            pending.doneTargets,
+            pending.persist
         )
     }
 
@@ -1135,21 +1341,24 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
      * collector changes that set, so the trees are read again and the strip
      * of the tab the viewer is looking at is rebuilt.
      */
-    private fun reloadCatalogs() {
+    private fun reloadCatalogs(invalidateCache: Boolean = false) {
         viewModelScope.launch {
             allCatalogs = repo.allCategoryCatalogs(_state.value.sources, client)
             _state.value = _state.value.copy(
                 categorySourceCount = allCatalogs.size,
                 categoryCatalogReady = true
             )
-            // The cached strips were built from the old source set.
-            feedCache.clear()
+            if (invalidateCache) {
+                // The cached strips were built from the old source set.
+                feedCache.clear()
+                feedDb.clear()
+            }
             val tab = _state.value.homeTab
             // Use the *currently selected* chip: the viewer may have switched
             // genre while the category trees were still being probed.
             val genre = tab.genres().firstOrNull { it.label == _state.value.genre }
             if (tab != HomeTab.HISTORY && tab != HomeTab.RECOMMEND && genre != null) {
-                startFeed(tab, genre, reset = true)
+                openFeed(tab, genre)
             }
         }
     }
@@ -1178,7 +1387,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         if (enabled) disabled.remove(url) else disabled.add(url)
         sourceStore.disabledUrls = disabled
         applySourceEntries(bundledSources)
-        reloadCatalogs()
+        reloadCatalogs(invalidateCache = true)
     }
 
     /** Delete a collector (bundled or custom). */
@@ -1192,7 +1401,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         }
         sourceStore.disabledUrls = sourceStore.disabledUrls - url
         applySourceEntries(bundledSources)
-        reloadCatalogs()
+        reloadCatalogs(invalidateCache = true)
     }
 
     /** Add a collector by hand. The name is optional; the URL is required. */
@@ -1204,7 +1413,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
         val cleanName = name.trim().ifEmpty { cleanUrl.substringAfter("://").substringBefore("/") }
         sourceStore.customSources = sourceStore.customSources + SourceConfig(cleanName, cleanUrl)
         applySourceEntries(bundledSources)
-        reloadCatalogs()
+        reloadCatalogs(invalidateCache = true)
         return true
     }
 
@@ -1212,7 +1421,7 @@ class TvViewModel(app: Application) : AndroidViewModel(app) {
     fun resetSources() {
         sourceStore.reset()
         applySourceEntries(bundledSources)
-        reloadCatalogs()
+        reloadCatalogs(invalidateCache = true)
     }
 
     /** Test one collector and store its reachability and round-trip time. */
