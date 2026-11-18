@@ -284,7 +284,7 @@ private fun SettingsToggleRow(
                 )
             }
             Spacer(Modifier.width(16.dp))
-            SwitchPill(value = value, focused = f)
+            SwitchPill(value = value)
         }
     }
 }
@@ -351,7 +351,7 @@ private fun SettingsEntryRow(
 
 /** On / off pill used by the toggle rows. */
 @Composable
-private fun SwitchPill(value: Boolean, focused: Boolean) {
+private fun SwitchPill(value: Boolean) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))

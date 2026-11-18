@@ -61,11 +61,11 @@ class SkipMarksTest {
 
     @Test
     fun `boundary adjustment never inverts the range`() {
-        val adjusted = SkipMarks.adjust(intro, SkipEdge.END, -120_000L, 1L)
+        val adjusted = SkipMarks.adjust(intro, SkipEdge.END, -120_000L)
         // 终点被拉到起点之前：保持原值，宁可不动也不要负长度。
         assertEquals(intro, adjusted)
 
-        val moved = SkipMarks.adjust(intro, SkipEdge.END, 5_000L, 1L)
+        val moved = SkipMarks.adjust(intro, SkipEdge.END, 5_000L)
         assertEquals(95_000L, moved.endMs)
     }
 

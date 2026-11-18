@@ -251,6 +251,7 @@ fun LibreNavHost(
                 val skipMarks by container.skipMarksState.collectAsState()
                 val skipKey = remember(current.title) { SkipMarks.keyOf(current.title) }
                 val recoveryNotice by container.recoveryNotice.collectAsState()
+                val pickerSession by container.pickerSession.collectAsState()
                 PlayerScreen(
                     title = current.title,
                     episodeName = current.episodeName,
@@ -310,14 +311,14 @@ fun LibreNavHost(
                     resumeRatio = current.resumeRatio,
                     recoveryOffers = session.activeOffer
                         ?.let { active ->
-                            container.pickerSession.value.group?.offers.orEmpty().filter {
+                            pickerSession.group?.offers.orEmpty().filter {
                                 it.key != active.key &&
                                     !it.isTrailer &&
-                                    it.key !in container.pickerSession.value.failedOfferKeys
+                                    it.key !in pickerSession.failedOfferKeys
                             }
                         }
                         .orEmpty(),
-                    recoverySwitches = container.pickerSession.value.recoverySwitches,
+                    recoverySwitches = pickerSession.recoverySwitches,
                     onSwitchSource = { offer, ratio, episodeIndex ->
                         playerVm.switchSource(offer, ratio, episodeIndex)
                     },

@@ -131,8 +131,7 @@ object SkipMarks {
     fun adjust(
         segment: SkipSegment,
         edge: SkipEdge,
-        deltaMs: Long,
-        updatedAt: Long
+        deltaMs: Long
     ): SkipSegment {
         val adjusted = when (edge) {
             SkipEdge.START -> segment.copy(startMs = segment.startMs + deltaMs)

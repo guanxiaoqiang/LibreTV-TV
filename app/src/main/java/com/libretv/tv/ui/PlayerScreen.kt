@@ -628,7 +628,7 @@ fun PlayerScreen(
                 },
                 onAdjust = { segment, edge, delta ->
                     val base = skipMark ?: SkipMark(titleKey = titleKey, title = title)
-                    val adjusted = SkipMarks.adjust(segment, edge, delta, System.currentTimeMillis())
+                    val adjusted = SkipMarks.adjust(segment, edge, delta)
                     onSaveSkipMark(SkipMarks.upsert(base, adjusted, System.currentTimeMillis()))
                 },
                 onUndo = { kind ->
