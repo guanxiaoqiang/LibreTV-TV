@@ -1,6 +1,8 @@
 package com.libretv.tv.data
 
 import android.content.Context
+import com.libretv.tv.data.local.StorageKeys
+import com.libretv.tv.data.local.migrateIfNeeded
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,11 +35,15 @@ fun mergeSearchHistory(
 class SearchHistoryStore(context: Context) {
 
     companion object {
-        private const val PREFS = "libretv_search_history"
-        private const val KEY = "keywords"
+        private val PREFS = StorageKeys.SEARCH_HISTORY
+        private val KEY = StorageKeys.SearchHistory.KEYWORDS
     }
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    init {
+        migrateIfNeeded(prefs)
+    }
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true

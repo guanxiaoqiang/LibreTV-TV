@@ -8,6 +8,9 @@ captures/
 
 # Local machine config
 local.properties
+keystore.properties
+*.keystore
+*.jks
 
 # Scratch output (screenshots, ad-hoc logs)
 temp/

@@ -1,13 +1,20 @@
 package com.libretv.tv.data
 
 import android.content.Context
+import com.libretv.tv.core.ApiResult
+import com.libretv.tv.core.FanOut
+import com.libretv.tv.core.Logger
+import com.libretv.tv.core.SourceError
+import com.libretv.tv.core.userMessage
+import com.libretv.tv.data.remote.CmsApi
+import com.libretv.tv.data.remote.DoubanApi
+import com.libretv.tv.data.remote.HttpEngine
+import com.libretv.tv.data.remote.ProbeEngine
+import com.libretv.tv.data.remote.parsePlayLines
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Loads the bundled source list from assets and performs fan-out search.
@@ -16,14 +23,41 @@ import kotlinx.serialization.json.Json
  * (30 collection APIs, probed 2026-11-14). Nothing about the app requires a
  * running server.
  */
-class SourceRepository(private val context: Context) {
+class SourceRepository(
+    private val context: Context,
+    /** 采集源 API：构造注入，方法不再接收 client 参数。 */
+    private val cms: CmsApi,
+    /** 豆瓣发现 API。 */
+    private val douban: DoubanApi
+) : com.libretv.tv.domain.gateway.SourceGateway,
+    com.libretv.tv.domain.gateway.ContentGateway {
     private val json = Json {
         ignoreUnknownKeys = true
         coerceInputValues = true
         isLenient = true
     }
 
-    suspend fun loadSources(): List<SourceConfig> = withContext(Dispatchers.IO) {
+    /**
+     * 分类树的短期缓存。
+     *
+     * 探活（`?ac=list`）与目录采集读的是同一棵树，缓存后同一轮里不会对同一个
+     * 源发两次相同的请求。
+     */
+    private val categoryCache = ConcurrentHashMap<String, CachedCategories>()
+
+    private class CachedCategories(val classes: List<VodClass>, val expiresAt: Long)
+
+    /** 流探活引擎：区分 HLS 与直链，HLS 会一路读到第一个分片。 */
+    private val probeEngine = ProbeEngine()
+
+    private companion object {
+        const val TAG = "SourceRepository"
+
+        /** 分类树缓存 10 分钟。 */
+        const val CATEGORY_CACHE_TTL_MS = 10 * 60 * 1000L
+    }
+
+    override suspend fun loadSources(): List<SourceConfig> = withContext(Dispatchers.IO) {
         try {
             val text = context.assets.open("sources.json").bufferedReader().use { it.readText() }
             json.decodeFromString<BundledSources>(text).sources
@@ -46,7 +80,7 @@ class SourceRepository(private val context: Context) {
      * Bundled pinyin-initial index: "ldqd" -> "流浪地球".
      * Lets a TV remote reach a Chinese title without an on-screen keyboard.
      */
-    suspend fun loadTitleIndex(): Map<String, String> = withContext(Dispatchers.IO) {
+    override suspend fun loadTitleIndex(): Map<String, String> = withContext(Dispatchers.IO) {
         try {
             val text = context.assets.open("title_index.json").bufferedReader().use { it.readText() }
             json.decodeFromString<Map<String, String>>(text)
@@ -63,58 +97,60 @@ class SourceRepository(private val context: Context) {
      * (one clock read per source) and a surprisingly good predictor of how long
      * a title takes to start on a TV.
      */
-    suspend fun searchAll(
+    override suspend fun searchAll(
         sources: List<SourceConfig>,
-        client: CmsClient,
         keyword: String
-    ): List<SearchResult> = coroutineScope {
-        sources.map { source ->
-            async(Dispatchers.IO) {
-                val start = System.currentTimeMillis()
-                val items = try {
-                    client.search(source.url, keyword)
-                } catch (e: Exception) {
-                    null
-                }
-                val latency = System.currentTimeMillis() - start
-                items.orEmpty().map { item ->
-                    SearchResult(
-                        sourceName = source.name,
-                        item = item,
-                        sourceUrl = source.url,
-                        latencyMs = latency
-                    )
-                }
-            }
-        }.awaitAll().flatten()
+    ): List<SearchResult> {
+        val started = System.currentTimeMillis()
+        val results = FanOut.map(sources) { source ->
+            val start = System.currentTimeMillis()
+            val items = cms.search(source, keyword).getOrNull()
+            val latency = System.currentTimeMillis() - start
+            items.orEmpty().map { item ->
+                SearchResult(
+                    sourceName = source.name,
+                    item = item,
+                    sourceUrl = source.url,
+                    latencyMs = latency
+                )
+            }.takeIf { it.isNotEmpty() }
+        }.flatten()
+        Logger.i(
+            TAG,
+            "搜索「$keyword」：${sources.size} 个源，命中 ${results.size} 条，" +
+                "耗时 ${System.currentTimeMillis() - started}ms"
+        )
+        return results
     }
 
     /**
-     * Find one source that exposes a usable category tree.
-     *
-     * Each collector numbers its categories differently, so the home screen
-     * works from a single catalog and maps names onto its own tabs. Probing a
-     * handful of sources concurrently keeps this to one network round while
-     * still tolerating dead mirrors.
+     * 豆瓣发现条带：直接代理给注入的 [DoubanApi]，失败由调用方按空条带处理。
      */
-    suspend fun loadCategoryCatalog(
-        sources: List<SourceConfig>,
-        client: CmsClient
-    ): CategoryCatalog? = coroutineScope {
-        sources.take(4).map { source ->
-            async(Dispatchers.IO) {
-                val classes = try {
-                    client.categories(source.url)
-                } catch (e: Exception) {
-                    emptyList()
-                }
-                source to classes
-            }
-        }.awaitAll()
-            .firstOrNull { (_, classes) ->
-                classes.size >= 4 && classes.any { it.parentId == 0 }
-            }
-            ?.let { (source, classes) -> CategoryCatalog(source, classes) }
+    override suspend fun doubanRecommendations(
+        tag: String,
+        pageSize: Int,
+        type: String,
+        start: Int
+    ): com.libretv.tv.core.ApiResult<List<com.libretv.tv.data.remote.DoubanSubject>> =
+        douban.recommendations(tag, pageSize, type, start)
+
+    /**
+     * 读取某个源的分类树，命中短期缓存时直接复用。
+     */
+    private suspend fun categoriesOf(source: SourceConfig): List<VodClass> {
+        val cached = categoryCache[source.url]
+        if (cached != null && cached.expiresAt > System.currentTimeMillis()) {
+            return cached.classes
+        }
+        val classes = cms.categories(source).getOrNull().orEmpty()
+        if (classes.isEmpty()) {
+            Logger.d(TAG, "读取分类树失败：${source.name}")
+        }
+        if (classes.isNotEmpty()) {
+            categoryCache[source.url] =
+                CachedCategories(classes, System.currentTimeMillis() + CATEGORY_CACHE_TTL_MS)
+        }
+        return classes
     }
 
     /**
@@ -125,24 +161,26 @@ class SourceRepository(private val context: Context) {
      * result is cached by the view model; sources without a usable tree are
      * skipped instead of blocking the whole tab.
      */
-    suspend fun allCategoryCatalogs(
-        sources: List<SourceConfig>,
-        client: CmsClient
-    ): List<CategoryCatalog> = coroutineScope {
-        sources.map { source ->
-            async(Dispatchers.IO) {
-                // A dead collector can otherwise hold the whole fan-out for
-                // three consecutive 18 s call timeouts. Cap one tree probe.
-                val classes = try {
-                    withTimeoutOrNull(8_000L) { client.categories(source.url) }.orEmpty()
-                } catch (e: Exception) {
-                    emptyList()
-                }
-                if (classes.size >= 4 && classes.any { it.parentId == 0 }) {
-                    CategoryCatalog(source, classes)
-                } else null
+    override suspend fun allCategoryCatalogs(
+        sources: List<SourceConfig>
+    ): List<CategoryCatalog> {
+        val started = System.currentTimeMillis()
+        // A dead collector can otherwise hold the whole fan-out for three
+        // consecutive 18 s call timeouts, so one tree probe is capped at 8 s.
+        val catalogs = FanOut.map(sources, perItemTimeoutMs = 8_000L) { source ->
+            val classes = categoriesOf(source)
+            if (classes.size >= 4 && classes.any { it.parentId == 0 }) {
+                CategoryCatalog(source, classes)
+            } else {
+                null
             }
-        }.awaitAll().filterNotNull()
+        }
+        Logger.i(
+            TAG,
+            "读取分类树：${sources.size} 个源，可用 ${catalogs.size} 个，" +
+                "耗时 ${System.currentTimeMillis() - started}ms"
+        )
+        return catalogs
     }
 
     /**
@@ -150,18 +188,13 @@ class SourceRepository(private val context: Context) {
      * and the round-trip time. The latency feeds the same quality/latency
      * badges used on the search results grid.
      */
-    suspend fun categoryShelf(
+    override suspend fun categoryShelf(
         source: SourceConfig,
         typeId: Int,
-        client: CmsClient,
-        page: Int = 1
+        page: Int
     ): List<SearchResult> = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
-        val items = try {
-            client.categoryItems(source.url, typeId, page)
-        } catch (e: Exception) {
-            emptyList()
-        }
+        val items = cms.categoryItems(source, typeId, page).getOrNull().orEmpty()
         val latency = System.currentTimeMillis() - start
         items.map { SearchResult(source.name, it, source.url, latency) }
     }
@@ -171,95 +204,100 @@ class SourceRepository(private val context: Context) {
      * number of lines / episodes, then time the first byte of the actual stream.
      * Failures are kept as zeroes so a dead source simply sorts lower.
      */
-    suspend fun probeOffer(offer: SourceOffer, client: CmsClient): OfferProbe =
+    override suspend fun probeOffer(offer: SourceOffer): OfferProbe =
         withContext(Dispatchers.IO) {
-            val source = SourceConfig(offer.sourceName, offer.sourceUrl)
+            val source = offer.asSource()
             val start = System.currentTimeMillis()
-            val bundle = try {
-                fetchDetail(source, offer.item, client)
-            } catch (e: Exception) {
-                null
-            }
+            val detail = cms.detail(source, offer.vodId).getOrNull()
             val detailMs = System.currentTimeMillis() - start
-            val lines = bundle?.lines.orEmpty()
+            // 兜底同 fetchDetail：详情没给线路时用条目里自带的播放地址，
+            // 否则探测拿不到流地址，选源页只能显示「首包未测到」。
+            val lines = detail?.let { parsePlayLines(it.playUrl) }.orEmpty()
+                .ifEmpty { parsePlayLines(offer.title.vodPlayUrl) }
             val episodes = lines.firstOrNull()?.episodes.orEmpty()
             val streamUrl = episodes.firstOrNull()?.url.orEmpty()
-            val firstByte = if (streamUrl.isNotBlank()) client.probeStream(streamUrl) else null
+            // HLS 会一路读到第一个分片，直链只读首字节；实测画质也来自这里。
+            val probe = if (streamUrl.isNotBlank()) probeEngine.probe(streamUrl) else null
             OfferProbe(
                 lineCount = lines.size,
                 episodeCount = episodes.size,
                 detailLatencyMs = detailMs,
-                firstByteMs = firstByte,
-                lineNames = lines.map { it.name }
+                firstByteMs = probe?.firstByteMs,
+                lineNames = lines.map { it.name },
+                measuredQuality = probe?.quality?.tier?.takeIf { it != QualityTier.UNKNOWN },
+                bandwidthBps = probe?.bandwidthBps?.takeIf { it > 0 }
             )
         }
 
     /** Probe a single source, used by the source health screen. */
-    suspend fun probe(source: SourceConfig, client: CmsClient): Boolean {
-        return try {
-            val items = client.search(source.url, "test")
-            items != null
-        } catch (e: Exception) {
-            false
-        }
-    }
+    suspend fun probe(source: SourceConfig): Boolean =
+        probeWithLatency(source).reachable
 
     /**
      * Test one source and report both reachability and round-trip time.
      *
-     * The source settings page shows this per row, so the measurement has to
-     * be cheap: a single search call against the collector, timed. A source
-     * that answers with data is reachable; anything else (timeout, HTTP error,
-     * malformed body) is reported as unreachable with the reason.
+     * The source settings page shows this per row, so the measurement has to be
+     * cheap and side-effect free: one `?ac=list` request against the collector,
+     * timed. Using the category list instead of a keyword search keeps the
+     * probe out of the collector's search statistics, and the tree it returns
+     * is reused by the catalog loader.
      */
-    suspend fun probeWithLatency(source: SourceConfig, client: CmsClient): SourceHealth {
+    override suspend fun probeWithLatency(source: SourceConfig): SourceHealth {
         val started = System.currentTimeMillis()
-        return try {
-            val items = client.search(source.url, "test")
-            val elapsed = System.currentTimeMillis() - started
-            if (items != null) {
-                SourceHealth(reachable = true, latencyMs = elapsed)
-            } else {
-                SourceHealth(reachable = false, latencyMs = elapsed, error = "无响应数据")
+        return when (val result = cms.probe(source)) {
+            is ApiResult.Ok -> {
+                val elapsed = System.currentTimeMillis() - started
+                val classes = result.value
+                if (classes.isNotEmpty()) {
+                    categoryCache[source.url] =
+                        CachedCategories(classes, System.currentTimeMillis() + CATEGORY_CACHE_TTL_MS)
+                }
+                SourceHealth(
+                    reachable = true,
+                    latencyMs = elapsed,
+                    state = HealthState.HEALTHY
+                )
             }
-        } catch (e: Exception) {
-            val elapsed = System.currentTimeMillis() - started
-            SourceHealth(
-                reachable = false,
-                latencyMs = elapsed,
-                error = e.message?.takeIf { it.isNotBlank() } ?: "连接失败"
-            )
+            is ApiResult.Err -> {
+                val elapsed = System.currentTimeMillis() - started
+                SourceHealth(
+                    reachable = false,
+                    latencyMs = elapsed,
+                    error = result.error.userMessage,
+                    lastError = result.error,
+                    state = HealthState.COOLDOWN
+                )
+            }
         }
     }
 
     /** Test every source at once and return one health record per source. */
-    suspend fun probeAll(
-        sources: List<SourceConfig>,
-        client: CmsClient
-    ): Map<String, SourceHealth> = coroutineScope {
-        sources.map { source ->
-            async(Dispatchers.IO) { source.url to probeWithLatency(source, client) }
-        }.awaitAll().toMap()
-    }
+    override suspend fun probeAll(
+        sources: List<SourceConfig>
+    ): Map<String, SourceHealth> = FanOut.map(sources) { source ->
+        source.url to probeWithLatency(source)
+    }.toMap()
 
-    suspend fun fetchDetail(
+    override suspend fun fetchDetail(
         source: SourceConfig,
-        item: VodItem,
-        client: CmsClient
-    ): DetailBundle? {
-        return try {
-            val result = client.detail(source.url, item.vodId)
-            if (result == null) {
-                DetailBundle(source.name, item, emptyList())
-            } else {
-                val (full, playRaw) = result
-                DetailBundle(source.name, full, client.parsePlayLines(playRaw))
-            }
-        } catch (e: Exception) {
-            null
-        }
+        item: VodItem
+    ): DetailBundle {
+        val detail = cms.detail(source, item.vodId).getOrNull()
+        // 详情请求失败或没解析出线路时，退回列表响应里自带的播放地址：
+        // maccms 的搜索 / 分类响应本来就带 `vod_play_url`，别让观众
+        // 明明能播却看到一个「无播放信息」的详情页。
+        val lines = detail?.let { parsePlayLines(it.playUrl) }.orEmpty()
+            .ifEmpty { parsePlayLines(item.vodPlayUrl) }
+        val merged = detail?.item ?: item
+        return DetailBundle(source.name, merged, lines)
     }
 }
+
+/** 探活/详情只需要一个最小身份。 */
+fun SourceOffer.asSource(): SourceConfig = SourceConfig(
+    name = sourceName,
+    url = sourceUrl
+)
 
 /**
  * Some entries in the bundled list are mirror wrappers of the form

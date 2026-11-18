@@ -1,5 +1,6 @@
 package com.libretv.tv.data
 
+import com.libretv.tv.domain.usecase.SearchSuggestions
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

@@ -27,13 +27,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.libretv.tv.data.LatencyTier
-import com.libretv.tv.data.OfferProbe
-import com.libretv.tv.data.QualityTier
-import com.libretv.tv.data.SourceOffer
-import com.libretv.tv.data.TitleGroup
-import com.libretv.tv.data.formatLatency
-import com.libretv.tv.data.latencyTier
+import com.libretv.tv.domain.model.LatencyTier
+import com.libretv.tv.domain.model.OfferProbe
+import com.libretv.tv.domain.model.QualityTier
+import com.libretv.tv.domain.model.SourceOffer
+import com.libretv.tv.domain.model.TitleGroup
+import com.libretv.tv.domain.model.formatLatency
+import com.libretv.tv.domain.model.latencyTier
 
 fun qualityColor(tier: QualityTier): Color = when (tier) {
     QualityTier.UHD_4K -> Color(0xFF8B7BF0)

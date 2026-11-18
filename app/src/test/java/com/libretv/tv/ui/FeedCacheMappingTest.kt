@@ -1,9 +1,15 @@
 package com.libretv.tv.ui
 
-import com.libretv.tv.data.QualityTier
-import com.libretv.tv.data.SourceOffer
-import com.libretv.tv.data.TitleGroup
-import com.libretv.tv.data.VodItem
+import com.libretv.tv.domain.model.FeedSnapshot
+import com.libretv.tv.domain.model.QualityTier
+import com.libretv.tv.domain.model.SourceOffer
+import com.libretv.tv.domain.model.TitleGroup
+import com.libretv.tv.domain.model.TitleRef
+import com.libretv.tv.domain.model.asFeedCard
+import com.libretv.tv.domain.model.toCached
+import com.libretv.tv.domain.model.toCachedFeed
+import com.libretv.tv.domain.model.toFeedCard
+import com.libretv.tv.domain.model.toSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -28,7 +34,7 @@ class FeedCacheMappingTest {
                 sourceName = "片库",
                 sourceUrl = "http://api.example",
                 vodId = "4021",
-                item = VodItem(vodId = "4021", vodName = "流浪地球"),
+                title = TitleRef(vodId = "4021", vodName = "流浪地球"),
                 quality = QualityTier.FULL_HD,
                 remark = "1080P",
                 latencyMs = 320L,
@@ -61,7 +67,7 @@ class FeedCacheMappingTest {
         assertEquals("http://api.example", offer?.sourceUrl)
         assertEquals("4021", offer?.vodId)
         assertEquals(QualityTier.FULL_HD, offer?.quality)
-        assertEquals("流浪地球", offer?.item?.vodName)
+        assertEquals("流浪地球", offer?.title?.vodName)
     }
 
     @Test
@@ -80,7 +86,7 @@ class FeedCacheMappingTest {
         val cached = snapshot.toCachedFeed("MOVIE|热门", 1_700_000_000_000L)
         val restored = cached.toSnapshot()
 
-        assertEquals("MOVIE|热门", restored.let { cached.key })
+        assertEquals("MOVIE|热门", cached.key)
         assertEquals(2, restored.nextSourcePage)
         assertEquals(40, restored.nextDoubanStart)
         assertTrue(restored.hasMore)

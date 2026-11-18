@@ -3,6 +3,7 @@ package com.libretv.tv
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import com.libretv.tv.di.AppContainer
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -16,6 +17,14 @@ import java.util.concurrent.TimeUnit
  * custom [ImageLoaderFactory].
  */
 class LibreTVApp : Application(), ImageLoaderFactory {
+
+    /**
+     * 应用级依赖容器。
+     *
+     * 全局只有一个：源清单、设置、搜索会话这些跨页面共享的状态都住在里面，
+     * 页面 ViewModel 各自订阅自己关心的那一部分。
+     */
+    val container: AppContainer by lazy { AppContainer(this) }
 
     override fun newImageLoader(): ImageLoader {
         val client = OkHttpClient.Builder()

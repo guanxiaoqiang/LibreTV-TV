@@ -1,11 +1,13 @@
 package com.libretv.tv.data
 
+import com.libretv.tv.data.remote.CmsApiImpl
+import com.libretv.tv.data.remote.HttpEngine
+import com.libretv.tv.data.remote.parsePlayLines
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import org.junit.Test
 import java.io.File
 
@@ -36,15 +38,11 @@ class LiveSourceProbe {
             .map { it.copy(url = unwrapSourceUrl(it.url)) }
         println("PROBE: ${sources.size} bundled sources")
 
-        val client = CmsClient()
+        val api = CmsApiImpl(HttpEngine())
         val results = coroutineScope {
             sources.map { src ->
                 async(Dispatchers.IO) {
-                    val items = try {
-                        client.search(src.url, "流浪地球")
-                    } catch (e: Exception) {
-                        null
-                    }
+                    val items = api.search(src, "流浪地球").getOrNull()
                     Triple(src.name, src.url, items)
                 }
             }.awaitAll()
@@ -69,19 +67,14 @@ class LiveSourceProbe {
                     ok++
                     println("OK    $name  hits=${items.size}  first=${items.first().vodName}")
                     // Try to pull a real play url for the first hit.
-                    val detail = try {
-                        client.detail(url, items.first().vodId)
-                    } catch (e: Exception) {
-                        null
-                    }
+                    val detail = api.detail(SourceConfig(name = name, url = url), items.first().vodId).getOrNull()
                     if (detail != null) {
-                        val (_, playRaw) = detail
-                        val lines = client.parsePlayLines(playRaw)
+                        val lines = parsePlayLines(detail.playUrl)
                         if (lines.isNotEmpty()) {
                             playable++
                             println("      play OK lines=${lines.size} first=${lines.first().episodes.firstOrNull()?.url?.take(60)}")
                         } else {
-                            println("      play EMPTY (raw length=${playRaw.length})")
+                            println("      play EMPTY (raw length=${detail.playUrl.length})")
                         }
                     } else {
                         println("      detail NULL")

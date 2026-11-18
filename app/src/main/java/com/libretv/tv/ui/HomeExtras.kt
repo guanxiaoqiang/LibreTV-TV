@@ -49,9 +49,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.libretv.tv.data.TitleGroup
-import com.libretv.tv.data.WatchRecord
-import com.libretv.tv.data.formatLatency
+import com.libretv.tv.domain.model.TitleGroup
+import com.libretv.tv.domain.model.WatchRecord
+import com.libretv.tv.domain.model.FeedCard
+import com.libretv.tv.domain.model.formatLatency
 
 /** Card size shared by the shelf and the full history grid. */
 private val HISTORY_CARD_WIDTH = 260.dp

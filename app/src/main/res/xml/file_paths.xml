@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 授权范围：只开放导出备份用的 cacheDir/backups 目录，
+  其它文件一律不给别的应用碰。
+-->
+<paths>
+    <cache-path
+        name="backups"
+        path="backups/" />
+</paths>

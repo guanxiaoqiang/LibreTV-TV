@@ -1,6 +1,8 @@
 package com.libretv.tv.data
 
 import android.content.Context
+import com.libretv.tv.data.local.StorageKeys
+import com.libretv.tv.data.local.migrateIfNeeded
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -19,7 +21,13 @@ import kotlinx.serialization.json.Json
  */
 class SourceStore(context: Context) {
     private val prefs = context.applicationContext
-        .getSharedPreferences("libretv_sources", Context.MODE_PRIVATE)
+        .getSharedPreferences(StorageKeys.SOURCES, Context.MODE_PRIVATE)
+
+    init {
+        // 冷却档位是 v1.1 才有的：老安装里没有这个键，读出来就是空 map，
+        // 迁移本身不需要搬数据，只是把版本号补上。
+        migrateIfNeeded(prefs)
+    }
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -62,39 +70,46 @@ class SourceStore(context: Context) {
             .remove(KEY_CUSTOM)
             .remove(KEY_REMOVED)
             .remove(KEY_DISABLED)
+            .remove(KEY_HEALTH)
             .apply()
     }
 
+    /**
+     * 阶梯冷却状态的持久化（按源地址）。
+     *
+     * 必须落盘：重启后 tier 归零的话，阶梯冷却就失效了——坏源每次启动
+     * 都要重新踩一遍 30 分钟、24 小时的坑。
+     */
+    var healthTiers: Map<String, HealthTierRecord>
+        get() {
+            val raw = prefs.getString(KEY_HEALTH, null) ?: return emptyMap()
+            return try {
+                json.decodeFromString<Map<String, HealthTierRecord>>(raw)
+            } catch (e: Exception) {
+                emptyMap()
+            }
+        }
+        set(value) {
+            prefs.edit()
+                .putString(KEY_HEALTH, json.encodeToString<Map<String, HealthTierRecord>>(value))
+                .apply()
+        }
+
     private companion object {
-        const val KEY_CUSTOM = "custom_sources"
-        const val KEY_REMOVED = "removed_urls"
-        const val KEY_DISABLED = "disabled_urls"
+        val KEY_CUSTOM = StorageKeys.Sources.CUSTOM
+        val KEY_REMOVED = StorageKeys.Sources.REMOVED
+        val KEY_DISABLED = StorageKeys.Sources.DISABLED
+        val KEY_HEALTH = StorageKeys.Sources.HEALTH_TIERS
     }
 }
 
-/** One row of the source settings list. */
-data class SourceEntry(
-    val config: SourceConfig,
-    /** False when the viewer switched this source off. */
-    val enabled: Boolean = true,
-    /** True for sources the viewer added by hand. */
-    val custom: Boolean = false
-) {
-    val name: String get() = config.name
-    val url: String get() = config.url
-}
-
-/**
- * Result of testing one source: is it reachable and how fast is it.
- *
- * [latencyMs] is the round-trip time of a real request to the collector, not
- * a ping, because a collector can answer TCP but fail on the API call.
- */
-data class SourceHealth(
-    val reachable: Boolean,
-    val latencyMs: Long = 0L,
-    /** Set when the last test failed; shown next to the source name. */
-    val error: String? = null
+/** 一个源跨进程的冷却档位记录（只存参与决策的最小集）。 */
+@kotlinx.serialization.Serializable
+data class HealthTierRecord(
+    val failureTier: Int = 0,
+    val cooldownUntil: Long = 0L,
+    /** [SourceHealth] 结构化的错误种类名，半开探测失败时沿用。 */
+    val lastErrorKind: String = ""
 )
 
 /**

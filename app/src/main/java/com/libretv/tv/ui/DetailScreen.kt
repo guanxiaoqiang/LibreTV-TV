@@ -34,10 +34,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.libretv.tv.data.DetailBundle
-import com.libretv.tv.data.SourceOffer
-import com.libretv.tv.data.formatLatency
-import com.libretv.tv.data.latencyTier
+import com.libretv.tv.domain.model.DetailBundle
+import com.libretv.tv.domain.model.SourceOffer
+import com.libretv.tv.domain.model.formatLatency
+import com.libretv.tv.domain.model.latencyTier
 
 @Composable
 fun DetailScreen(
@@ -47,9 +47,10 @@ fun DetailScreen(
     activeLine: Int,
     onSelectLine: (Int) -> Unit,
     onPlay: (lineIndex: Int, episodeIndex: Int) -> Unit,
-    onBack: () -> Unit,
     offer: SourceOffer? = null,
-    onSwitchSource: (() -> Unit)? = null
+    onSwitchSource: (() -> Unit)? = null,
+    alternatives: List<SourceOffer> = emptyList(),
+    onPickAlternative: ((SourceOffer) -> Unit)? = null
 ) {
     if (detail == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -91,17 +92,12 @@ fun DetailScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            FocusableTile(onClick = onBack) { f ->
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
-                        .tvFocusable(f, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 18.dp, vertical = 10.dp)
-                ) {
-                    Text("返回", color = if (f) TvColors.Primary else TvColors.OnSurface, fontSize = 14.sp)
-                }
-            }
+            // 不放返回按钮：遥控器返回键直接退回上一页。
+            Text(
+                "按遥控器返回键返回",
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 12.sp
+            )
         }
 
         Spacer(Modifier.width(36.dp))
@@ -170,7 +166,50 @@ fun DetailScreen(
             Spacer(Modifier.height(20.dp))
 
             if (lines.isEmpty()) {
-                Text("该源未提供播放信息", color = TvColors.Danger, fontSize = 14.sp)
+                Text(
+                    error ?: "该源未提供播放信息",
+                    color = TvColors.Danger,
+                    fontSize = 14.sp
+                )
+                // 没有线路不该是死胡同：把同片的其它源直接摆出来，
+                // 观众点一下就换源重试，不用退回搜索结果重来。
+                if (alternatives.isNotEmpty() && onPickAlternative != null) {
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "试试这些源（点击切换）",
+                        color = TvColors.OnSurface,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    alternatives.forEach { alt ->
+                        FocusableTile(onClick = { onPickAlternative(alt) }) { f ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (f) TvColors.Primary else TvColors.Surface)
+                                    .tvFocusable(f, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    alt.sourceName,
+                                    color = if (f) Color(0xFF14181D) else TvColors.OnSurface,
+                                    fontSize = 14.sp,
+                                    fontWeight = if (f) FontWeight.Medium else FontWeight.Normal
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    "${alt.quality.label} · ${formatLatency(alt.latencyMs)}",
+                                    color = if (f) Color(0xFF14181D) else TvColors.OnSurfaceMuted,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
                 return@Column
             }
 

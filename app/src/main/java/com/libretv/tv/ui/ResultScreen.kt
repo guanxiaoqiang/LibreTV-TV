@@ -1,6 +1,5 @@
 package com.libretv.tv.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,21 +13,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.libretv.tv.data.BadgeVisibility
-import com.libretv.tv.data.SearchResult
-import com.libretv.tv.data.TitleGroup
-import com.libretv.tv.data.aggregate
+import com.libretv.tv.domain.model.BadgeVisibility
+import com.libretv.tv.domain.model.SearchResult
+import com.libretv.tv.domain.model.TitleGroup
+import com.libretv.tv.domain.model.FeedCard
+import com.libretv.tv.domain.model.aggregate
+import com.libretv.tv.domain.model.asFeedCard
 
 /**
  * Search results, folded by title and drawn with the exact same card as the
@@ -45,8 +44,7 @@ fun ResultScreen(
     results: List<SearchResult>,
     searching: Boolean,
     badgeVisibility: BadgeVisibility = BadgeVisibility(),
-    onOpenGroup: (TitleGroup) -> Unit,
-    onBack: () -> Unit
+    onOpenGroup: (TitleGroup) -> Unit
 ) {
     val groups = remember(results) { aggregate(results) }
     val cards = remember(groups) { groups.map { it.asFeedCard() } }
@@ -78,21 +76,13 @@ fun ResultScreen(
                     fontSize = 13.sp
                 )
             }
-            FocusableTile(onClick = onBack) { f ->
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
-                        .tvFocusable(f, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 18.dp, vertical = 10.dp)
-                ) {
-                    Text(
-                        "返回",
-                        color = if (f) TvColors.Primary else TvColors.OnSurface,
-                        fontSize = 14.sp
-                    )
-                }
-            }
+            // 页面里不放返回按钮：遥控器的返回键直接退回上一页，
+            // 焦点落在卡片上时按返回键也不会误触。
+            Text(
+                "按遥控器返回键返回",
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 12.sp
+            )
         }
 
         Spacer(Modifier.height(8.dp))

@@ -1,5 +1,7 @@
 package com.libretv.tv.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +40,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -44,8 +48,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
-import com.libretv.tv.data.SourceEntry
-import com.libretv.tv.data.SourceHealth
+import com.libretv.tv.domain.model.HealthState
+import com.libretv.tv.domain.model.SourceConfig
+import com.libretv.tv.domain.model.SourceEntry
+import com.libretv.tv.domain.model.SourceHealth
+import com.libretv.tv.domain.model.Subscription
+import com.libretv.tv.domain.model.TvboxParseResult
+import com.libretv.tv.domain.model.shortLatency
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Source settings page.
@@ -63,14 +75,51 @@ fun SourcesScreen(
     onToggleSource: (String, Boolean) -> Unit,
     onTestSource: (String) -> Unit,
     onTestAll: () -> Unit,
+    onResumeSource: (String) -> Unit,
     onRemoveSource: (String) -> Unit,
-    onAddSource: (String, String) -> Boolean,
+    onAddSource: (String, String, String) -> Boolean,
     onResetSources: () -> Unit,
-    onBack: () -> Unit
+    subscriptions: List<Subscription>,
+    syncingSubscriptions: Set<String>,
+    onAddSubscription: (String, String, Int) -> Boolean,
+    onUpdateSubscription: (String, String, String, Int) -> Boolean,
+    onDeleteSubscription: (String) -> Unit,
+    onSyncSubscription: (String) -> Unit,
+    onParseConfig: (String) -> TvboxParseResult,
+    onImportSources: (List<SourceConfig>) -> Int
 ) {
     var showAdd by remember { mutableStateOf(false) }
     // Removing a collector is destructive, so it goes through a confirmation.
     var pendingRemove by remember { mutableStateOf<SourceEntry?>(null) }
+    // 订阅的新增与编辑共用一个弹窗；[editingSubscription] 为 null 表示新增。
+    var showSubscriptionEditor by remember { mutableStateOf(false) }
+    var editingSubscription by remember { mutableStateOf<Subscription?>(null) }
+    var pendingSubscriptionRemove by remember { mutableStateOf<Subscription?>(null) }
+    // 导入 TVBOX 配置：选文件 → 解析 → 预览 → 确认导入。
+    var pendingImport by remember { mutableStateOf<TvboxParseResult.Ok?>(null) }
+    var importError by remember { mutableStateOf("") }
+    val importScope = rememberCoroutineScope()
+    val importContext = LocalContext.current
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        importScope.launch {
+            val text = withContext(Dispatchers.IO) {
+                runCatching {
+                    importContext.contentResolver.openInputStream(uri)
+                        ?.bufferedReader()
+                        ?.use { it.readText() }
+                }.getOrNull()
+            }
+            if (text.isNullOrBlank()) {
+                importError = "读不到文件内容"
+                return@launch
+            }
+            when (val result = onParseConfig(text)) {
+                is TvboxParseResult.Ok -> pendingImport = result
+                is TvboxParseResult.Err -> importError = result.message
+            }
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -104,17 +153,55 @@ fun SourcesScreen(
                 }
                 HeaderButton(label = "添加源", onClick = { showAdd = true })
                 Spacer(Modifier.width(10.dp))
+                HeaderButton(
+                    label = "导入配置",
+                    onClick = {
+                        importError = ""
+                        importLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                    }
+                )
+                Spacer(Modifier.width(10.dp))
                 HeaderButton(label = "全部测试", onClick = onTestAll)
                 Spacer(Modifier.width(10.dp))
                 HeaderButton(label = "恢复默认", onClick = onResetSources)
                 Spacer(Modifier.width(10.dp))
-                HeaderButton(label = "返回", onClick = onBack)
+                // 不放返回按钮：遥控器返回键直接退回上一页。
+                Text(
+                    "按遥控器返回键返回",
+                    color = TvColors.OnSurfaceMuted,
+                    fontSize = 12.sp
+                )
             }
 
             Spacer(Modifier.height(14.dp))
 
+            if (importError.isNotEmpty()) {
+                Text(importError, color = TvColors.Danger, fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+            }
+
+            SubscriptionSection(
+                subscriptions = subscriptions,
+                syncingIds = syncingSubscriptions,
+                onAdd = {
+                    editingSubscription = null
+                    showSubscriptionEditor = true
+                },
+                onEdit = { target ->
+                    editingSubscription = target
+                    showSubscriptionEditor = true
+                },
+                onDelete = { target -> pendingSubscriptionRemove = target },
+                onSync = { target -> onSyncSubscription(target.id) }
+            )
+
+            Spacer(Modifier.height(16.dp))
+
             if (entries.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.fillMaxWidth().weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
                         "没有可用的采集源，请点击「添加源」手动添加接口",
                         color = TvColors.OnSurfaceMuted,
@@ -127,7 +214,7 @@ fun SourcesScreen(
                     // Side padding leaves room for the 1.06x focused row to
                     // grow without being clipped by the screen edge.
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxWidth().weight(1f)
                 ) {
                     itemsIndexed(entries, key = { _, e -> e.url }) { _, entry ->
                         SourceRow(
@@ -136,6 +223,7 @@ fun SourcesScreen(
                             testing = testingUrl == entry.url,
                             onToggle = { onToggleSource(entry.url, !entry.enabled) },
                             onTest = { onTestSource(entry.url) },
+                            onResume = { onResumeSource(entry.url) },
                             onRemove = { pendingRemove = entry }
                         )
                     }
@@ -145,8 +233,8 @@ fun SourcesScreen(
 
         if (showAdd) {
             AddSourceDialog(
-                onConfirm = { name, url ->
-                    val ok = onAddSource(name, url)
+                onConfirm = { name, url, dialect ->
+                    val ok = onAddSource(name, url, dialect)
                     if (ok) showAdd = false
                     ok
                 },
@@ -164,6 +252,138 @@ fun SourcesScreen(
                 onCancel = { pendingRemove = null }
             )
         }
+
+        if (showSubscriptionEditor) {
+            SubscriptionEditorDialog(
+                subscription = editingSubscription,
+                onConfirm = { name, url, days ->
+                    val target = editingSubscription
+                    val ok = if (target == null) {
+                        onAddSubscription(name, url, days)
+                    } else {
+                        onUpdateSubscription(target.id, name, url, days)
+                    }
+                    if (ok) showSubscriptionEditor = false
+                    ok
+                },
+                onCancel = { showSubscriptionEditor = false }
+            )
+        }
+
+        pendingSubscriptionRemove?.let { target ->
+            RemoveSubscriptionDialog(
+                subscription = target,
+                onConfirm = {
+                    onDeleteSubscription(target.id)
+                    pendingSubscriptionRemove = null
+                },
+                onCancel = { pendingSubscriptionRemove = null }
+            )
+        }
+
+        pendingImport?.let { result ->
+            TvboxImportPreview(
+                sources = result.sources,
+                skipped = result.skipped,
+                onConfirm = {
+                    val added = onImportSources(result.sources)
+                    pendingImport = null
+                    importError = if (added == 0) "没有新增源：这些源已经存在" else ""
+                },
+                onCancel = { pendingImport = null }
+            )
+        }
+    }
+}
+
+/**
+ * 确认删除订阅。
+ *
+ * 删除订阅会连带删掉它带来的那些采集源，所以跟删除采集源一样要两步。
+ */
+@Composable
+private fun RemoveSubscriptionDialog(
+    subscription: Subscription,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val confirmRequester = remember { FocusRequester() }
+    val cancelRequester = remember { FocusRequester() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xCC000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(480.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(TvColors.Surface)
+                .border(1.dp, TvColors.SurfaceHigh, RoundedCornerShape(14.dp))
+                .padding(24.dp)
+        ) {
+            Text(
+                "删除订阅？",
+                color = TvColors.OnSurface,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "「${subscription.name}」将被删除，它带来的采集源也会一并移除。观众自己添加的源不受影响。",
+                color = TvColors.OnSurfaceMuted,
+                fontSize = 13.sp
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FocusableTile(
+                    onClick = onConfirm,
+                    modifier = Modifier
+                        .focusRequester(confirmRequester)
+                        .focusProperties { right = cancelRequester }
+                ) { f ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (f) TvColors.Danger else TvColors.SurfaceHigh)
+                            .tvFocusable(f, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 22.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            "确认删除",
+                            color = if (f) Color(0xFF14181D) else TvColors.Danger,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+                FocusableTile(
+                    onClick = onCancel,
+                    modifier = Modifier
+                        .focusRequester(cancelRequester)
+                        .focusProperties { left = confirmRequester }
+                ) { f ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (f) TvColors.SurfaceHigh else TvColors.Surface)
+                            .tvFocusable(f, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 22.dp, vertical = 10.dp)
+                    ) {
+                        Text(
+                            "取消",
+                            color = if (f) TvColors.Primary else TvColors.OnSurface,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(subscription.id) {
+        runCatching { cancelRequester.requestFocus() }
     }
 }
 
@@ -183,13 +403,15 @@ private fun SourceRow(
     testing: Boolean,
     onToggle: () -> Unit,
     onTest: () -> Unit,
+    onResume: () -> Unit,
     onRemove: () -> Unit
 ) {
     var nameFocused by remember { mutableStateOf(false) }
     var toggleFocused by remember { mutableStateOf(false) }
     var testFocused by remember { mutableStateOf(false) }
+    var resumeFocused by remember { mutableStateOf(false) }
     var removeFocused by remember { mutableStateOf(false) }
-    val rowFocused = nameFocused || toggleFocused || testFocused || removeFocused
+    val rowFocused = nameFocused || toggleFocused || testFocused || resumeFocused || removeFocused
 
     Row(
         modifier = Modifier
@@ -256,7 +478,11 @@ private fun SourceRow(
                 HealthLabel(health = health, testing = testing)
                 if (entry.custom) {
                     Spacer(Modifier.width(8.dp))
-                    MiniTag(text = "自建", color = TvColors.Info)
+                    // 订阅带来的源标成「订阅」，让观众一眼看出它下次同步还会回来。
+                    MiniTag(
+                        text = if (entry.config.subscriptionId.isNotEmpty()) "订阅" else "自建",
+                        color = TvColors.Info
+                    )
                 }
             }
         }
@@ -273,6 +499,14 @@ private fun SourceRow(
             onClick = onTest,
             onFocusChange = { testFocused = it }
         )
+        if (health?.state == HealthState.SUSPENDED) {
+            Spacer(Modifier.width(8.dp))
+            MiniButton(
+                label = "恢复",
+                onClick = onResume,
+                onFocusChange = { resumeFocused = it }
+            )
+        }
         Spacer(Modifier.width(8.dp))
         MiniButton(
             label = "删除",
@@ -291,25 +525,37 @@ private fun HealthLabel(health: SourceHealth?, testing: Boolean) {
             "测试中…",
             color = TvColors.Primary,
             fontSize = 12.sp,
-            modifier = Modifier.width(110.dp)
+            modifier = Modifier.width(130.dp)
         )
         health == null -> Text(
             "未测试",
             color = TvColors.OnSurfaceMuted,
             fontSize = 12.sp,
-            modifier = Modifier.width(110.dp)
+            modifier = Modifier.width(130.dp)
         )
         health.reachable -> Text(
             "正常 · ${shortLatency(health.latencyMs)}",
             color = TvColors.Success,
             fontSize = 12.sp,
-            modifier = Modifier.width(110.dp)
+            modifier = Modifier.width(130.dp)
+        )
+        health.state == HealthState.SUSPENDED -> Text(
+            "已停用",
+            color = TvColors.Danger,
+            fontSize = 12.sp,
+            modifier = Modifier.width(130.dp)
+        )
+        health.state == HealthState.COOLDOWN -> Text(
+            "冷却 ${shortLatency(health.cooldownRemainingMs())}",
+            color = TvColors.Warning,
+            fontSize = 12.sp,
+            modifier = Modifier.width(130.dp)
         )
         else -> Text(
             "失败 · ${shortLatency(health.latencyMs)}",
             color = TvColors.Danger,
             fontSize = 12.sp,
-            modifier = Modifier.width(110.dp)
+            modifier = Modifier.width(130.dp)
         )
     }
 }
@@ -488,11 +734,12 @@ private fun RemoveSourceDialog(
  */
 @Composable
 private fun AddSourceDialog(
-    onConfirm: (String, String) -> Boolean,
+    onConfirm: (String, String, String) -> Boolean,
     onCancel: () -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
+    var dialect by remember { mutableStateOf("standard") }
     var error by remember { mutableStateOf("") }
 
     Box(
@@ -531,6 +778,42 @@ private fun AddSourceDialog(
                 onValueChange = { url = it },
                 keyboardType = KeyboardType.Uri
             )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("接口方言", color = TvColors.OnSurfaceMuted, fontSize = 12.sp)
+                listOf("standard" to "标准", "lenient" to "宽松").forEach { (id, label) ->
+                    FocusableTile(onClick = { dialect = id }) { f ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    when {
+                                        dialect == id && f -> TvColors.Primary
+                                        dialect == id -> TvColors.Primary.copy(alpha = 0.25f)
+                                        f -> TvColors.SurfaceHigh
+                                        else -> TvColors.Surface
+                                    }
+                                )
+                                .border(
+                                    1.dp,
+                                    if (dialect == id) TvColors.Primary else TvColors.SurfaceHigh,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .tvFocusable(f, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                label,
+                                color = if (dialect == id) TvColors.OnSurface else TvColors.OnSurfaceMuted,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            }
 
             if (error.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
@@ -539,7 +822,7 @@ private fun AddSourceDialog(
 
             Spacer(Modifier.height(20.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FocusableTile(onClick = { onConfirm(name, url) }) { f ->
+                FocusableTile(onClick = { onConfirm(name, url, dialect) }) { f ->
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))

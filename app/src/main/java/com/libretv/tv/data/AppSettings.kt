@@ -1,6 +1,9 @@
 package com.libretv.tv.data
 
 import android.content.Context
+import com.libretv.tv.core.LogLevel
+import com.libretv.tv.data.local.StorageKeys
+import com.libretv.tv.data.local.migrateIfNeeded
 
 /**
  * User-facing switches of the app, persisted in SharedPreferences.
@@ -11,7 +14,28 @@ import android.content.Context
  */
 class AppSettings(context: Context) {
     private val prefs = context.applicationContext
-        .getSharedPreferences("libretv_settings", Context.MODE_PRIVATE)
+        .getSharedPreferences(StorageKeys.SETTINGS, Context.MODE_PRIVATE)
+
+    init {
+        migrateIfNeeded(prefs)
+    }
+
+    /**
+     * 日志级别。
+     *
+     * 默认只留 INFO 及以上：网络请求的 DEBUG 日志量很大，留给需要排查问题时
+     * 再打开。
+     */
+    var logLevel: LogLevel
+        get() = LogLevel.parse(prefs.getString(KEY_LOG_LEVEL, null))
+        set(value) = prefs.edit().putString(KEY_LOG_LEVEL, value.name).apply()
+
+    /** 调试日志总开关（设置页上的一个开关）。 */
+    var debugLogEnabled: Boolean
+        get() = logLevel == LogLevel.DEBUG
+        set(value) {
+            logLevel = if (value) LogLevel.DEBUG else LogLevel.INFO
+        }
 
     /** Strip ad segments out of HLS playlists (LibreTV's original rule set). */
     var adFilterEnabled: Boolean
@@ -79,13 +103,25 @@ class AppSettings(context: Context) {
             posterBadgeDouban = value.douban
         }
 
+    /**
+     * 跳过标记总开关。
+     *
+     * 关掉之后所有影片都不再自动跳过，但已标记的区间还留着——观众随时能
+     * 再打开。
+     */
+    var skipMarksEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SKIP_MARKS, true)
+        set(value) = prefs.edit().putBoolean(KEY_SKIP_MARKS, value).apply()
+
     private companion object {
-        const val KEY_AD_FILTER = "ad_filter_enabled"
-        const val KEY_POSTER_BADGES = "poster_badges_enabled"
-        const val KEY_BADGE_YEAR = "poster_badge_year"
-        const val KEY_BADGE_SOURCES = "poster_badge_sources"
-        const val KEY_BADGE_QUALITY = "poster_badge_quality"
-        const val KEY_BADGE_LATENCY = "poster_badge_latency"
-        const val KEY_BADGE_DOUBAN = "poster_badge_douban"
+        val KEY_AD_FILTER = StorageKeys.Settings.AD_FILTER
+        val KEY_POSTER_BADGES = StorageKeys.Settings.POSTER_BADGES
+        val KEY_BADGE_YEAR = StorageKeys.Settings.BADGE_YEAR
+        val KEY_BADGE_SOURCES = StorageKeys.Settings.BADGE_SOURCES
+        val KEY_BADGE_QUALITY = StorageKeys.Settings.BADGE_QUALITY
+        val KEY_BADGE_LATENCY = StorageKeys.Settings.BADGE_LATENCY
+        val KEY_BADGE_DOUBAN = StorageKeys.Settings.BADGE_DOUBAN
+        val KEY_LOG_LEVEL = StorageKeys.Settings.LOG_LEVEL
+        val KEY_SKIP_MARKS = StorageKeys.Settings.SKIP_MARKS
     }
 }

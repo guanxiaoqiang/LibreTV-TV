@@ -1,5 +1,9 @@
 package com.libretv.tv.ui
 
+import com.libretv.tv.domain.model.FeedBadge
+import com.libretv.tv.domain.model.FeedBadgeKind
+import com.libretv.tv.domain.model.FeedCard
+import com.libretv.tv.domain.usecase.mergeStableCards
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Test

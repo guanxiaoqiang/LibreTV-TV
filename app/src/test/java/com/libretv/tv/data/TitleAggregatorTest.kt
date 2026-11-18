@@ -1,11 +1,25 @@
 package com.libretv.tv.data
 
+import com.libretv.tv.domain.model.LatencyTier
+import com.libretv.tv.domain.model.QualityTier
+import com.libretv.tv.domain.model.SourceOffer
+import com.libretv.tv.domain.model.TitleGroup
+import com.libretv.tv.domain.model.TitleRef
+import com.libretv.tv.domain.model.aggregate
+import com.libretv.tv.domain.model.detectQuality
+import com.libretv.tv.domain.model.formatLatency
+import com.libretv.tv.domain.model.latencyTier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Pure tests for the search-result folding, quality hints and latency tiers. */
 class TitleAggregatorTest {
+
+    private fun ref(
+        vodId: String,
+        remarks: String = ""
+    ) = TitleRef(vodId = vodId, vodRemarks = remarks)
 
     private fun result(
         source: String,
@@ -91,19 +105,19 @@ class TitleAggregatorTest {
     fun `quality hints come from remarks and play line names`() {
         assertEquals(
             QualityTier.UHD_4K,
-            detectQuality(VodItem(vodRemarks = "4K修复", vodPlayFrom = "lzm3u8"))
+            detectQuality(ref("1", remarks = "4K修复"))
         )
         assertEquals(
             QualityTier.FULL_HD,
-            detectQuality(VodItem(vodRemarks = "正片", vodPlayFrom = "dytt"), listOf("蓝光线路"))
+            detectQuality(ref("2", remarks = "正片"), listOf("蓝光线路"))
         )
         assertEquals(
             QualityTier.HD,
-            detectQuality(VodItem(vodRemarks = "HD国语"))
+            detectQuality(ref("3", remarks = "HD国语"))
         )
         assertEquals(
             QualityTier.UNKNOWN,
-            detectQuality(VodItem(vodRemarks = ""))
+            detectQuality(ref("4"))
         )
     }
 
@@ -116,5 +130,75 @@ class TitleAggregatorTest {
         assertEquals(LatencyTier.UNKNOWN, latencyTier(0))
         assertEquals("228 ms", formatLatency(228))
         assertEquals("2.7 s", formatLatency(2685))
+    }
+
+    @Test
+    fun `measured quality wins over the declared one`() {
+        val offer = SourceOffer(
+            sourceName = "a",
+            sourceUrl = "https://a.invalid",
+            vodId = "1",
+            title = TitleRef(vodId = "1", vodRemarks = "4K修复"),
+            quality = QualityTier.UHD_4K,
+            remark = "4K修复",
+            latencyMs = 100L,
+            isTrailer = false,
+            measuredQuality = QualityTier.SD,
+            bandwidthBps = 800_000
+        )
+        // 声明说是 4K，实测只有标清——以实测为准。
+        assertEquals(QualityTier.SD, offer.effectiveQuality)
+    }
+
+    @Test
+    fun `the text hint is the fallback when nothing was measured`() {
+        val offer = SourceOffer(
+            sourceName = "a",
+            sourceUrl = "https://a.invalid",
+            vodId = "1",
+            title = TitleRef(vodId = "1", vodRemarks = "HD国语"),
+            quality = QualityTier.HD,
+            remark = "HD国语",
+            latencyMs = 100L,
+            isTrailer = false
+        )
+        assertEquals(QualityTier.HD, offer.effectiveQuality)
+    }
+
+    @Test
+    fun `the group reports the best effective quality`() {
+        val group = TitleGroup(
+            key = "k",
+            title = "某片",
+            poster = "",
+            year = "2024",
+            area = "",
+            typeName = "电影",
+            offers = listOf(
+                SourceOffer(
+                    sourceName = "declared4k",
+                    sourceUrl = "https://a.invalid",
+                    vodId = "1",
+                    title = TitleRef(vodId = "1"),
+                    quality = QualityTier.UHD_4K,
+                    remark = "",
+                    latencyMs = 10L,
+                    isTrailer = false,
+                    measuredQuality = QualityTier.SD
+                ),
+                SourceOffer(
+                    sourceName = "measured1080",
+                    sourceUrl = "https://b.invalid",
+                    vodId = "2",
+                    title = TitleRef(vodId = "2"),
+                    quality = QualityTier.UNKNOWN,
+                    remark = "",
+                    latencyMs = 20L,
+                    isTrailer = false,
+                    measuredQuality = QualityTier.FULL_HD
+                )
+            )
+        )
+        assertEquals(QualityTier.FULL_HD, group.bestQuality)
     }
 }

@@ -9,65 +9,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import com.libretv.tv.data.remote.DoubanSubject
+import com.libretv.tv.domain.model.CachedFeed
+import com.libretv.tv.domain.model.FeedCachePolicy
 
-/**
- * One cached strip of cards, keyed by "TAB|genre".
- *
- * The payload is deliberately thin. A card only needs enough to draw itself
- * and to open the title again: the playable lines are refetched from the
- * collector when the viewer picks a title, so they are never stored. That
- * keeps a cached tab in the tens of kilobytes instead of megabytes.
- */
-@Serializable
-data class CachedFeed(
-    val key: String = "",
-    val savedAt: Long = 0L,
-    val cards: List<CachedCard> = emptyList(),
-    val nextSourcePage: Int = 1,
-    val nextDoubanStart: Int = 0,
-    val hasMore: Boolean = true,
-    val totalItems: Int = 0
-)
-
-@Serializable
-data class CachedCard(
-    val key: String = "",
-    val title: String = "",
-    val poster: String = "",
-    val badges: List<CachedBadge> = emptyList(),
-    val cornerBadge: String? = null,
-    val group: CachedGroup? = null,
-    val subject: DoubanSubject? = null
-)
-
-@Serializable
-data class CachedBadge(
-    val text: String = "",
-    val kind: String = "NEUTRAL",
-    val tag: String? = null
-)
-
-@Serializable
-data class CachedGroup(
-    val key: String = "",
-    val title: String = "",
-    val poster: String = "",
-    val year: String = "",
-    val area: String = "",
-    val typeName: String = "",
-    val offers: List<CachedOffer> = emptyList()
-)
-
-@Serializable
-data class CachedOffer(
-    val sourceName: String = "",
-    val sourceUrl: String = "",
-    val vodId: String = "",
-    val quality: String = "UNKNOWN",
-    val remark: String = "",
-    val latencyMs: Long = 0L,
-    val isTrailer: Boolean = false
-)
+// 缓存模型已迁至 `domain/model/Cache.kt`（`data/Models.kt` 里的 typealias 保持旧引用可用）。
+// 失效判定在 `domain/model/FeedCachePolicy.kt`，本类只负责存取与迁移。
 
 /**
  * The local card cache of the home tabs.
@@ -76,9 +23,13 @@ data class CachedOffer(
  * JSON payload. It gives the app a fast first paint on every start and on
  * every tab switch — the grid is on screen before the network answers — while
  * the network still refreshes the strip in the background.
+ *
+ * Schema v2 adds the natural-invalidation columns (`version` / `ttl_minutes` /
+ * `source_signature`, §D.2). There is no manual wipe path any more: a source
+ * set change moves the cache key and the signature check rejects old rows.
  */
 class FeedCacheDb(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "feed_cache.db", null, 1) {
+    SQLiteOpenHelper(context.applicationContext, "feed_cache.db", null, 2) {
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -91,23 +42,48 @@ class FeedCacheDb(context: Context) :
             CREATE TABLE IF NOT EXISTS feed_cache (
                 key TEXT PRIMARY KEY NOT NULL,
                 payload TEXT NOT NULL,
-                saved_at INTEGER NOT NULL
+                saved_at INTEGER NOT NULL,
+                version INTEGER NOT NULL DEFAULT 0,
+                ttl_minutes INTEGER NOT NULL DEFAULT 0,
+                source_signature TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
     }
 
+    /**
+     * v1 → v2 只加列，不重建表：旧行原地保留（version 落到默认值 0），
+     * 读取时被 [FeedCachePolicy.isValid] 判为过期，数据不丢。
+     */
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS feed_cache")
-        onCreate(db)
+        if (oldVersion < 2) {
+            db.execSQL(
+                "ALTER TABLE feed_cache ADD COLUMN version INTEGER NOT NULL DEFAULT 0"
+            )
+            db.execSQL(
+                "ALTER TABLE feed_cache ADD COLUMN ttl_minutes INTEGER NOT NULL DEFAULT 0"
+            )
+            db.execSQL(
+                "ALTER TABLE feed_cache ADD COLUMN source_signature TEXT NOT NULL DEFAULT ''"
+            )
+        }
     }
 
-    /** The cached strip of [key], or null when nothing was stored for it. */
-    suspend fun read(key: String): CachedFeed? = withContext(Dispatchers.IO) {
+    /**
+     * The cached strip of [key], but only when it is still valid.
+     *
+     * 过期 / 版本不符 / 签名不符都返回 null——调用方看不到「半新的数据」，
+     * 也不需要再手工清库。旧 schema 的行（version = 0）在这里自然过期。
+     */
+    suspend fun read(
+        key: String,
+        sourceSignature: String,
+        now: Long = System.currentTimeMillis()
+    ): CachedFeed? = withContext(Dispatchers.IO) {
         runCatching {
             readableDatabase.query(
                 "feed_cache",
-                arrayOf("payload"),
+                arrayOf("payload", "version", "ttl_minutes", "source_signature", "saved_at"),
                 "key = ?",
                 arrayOf(key),
                 null,
@@ -115,18 +91,35 @@ class FeedCacheDb(context: Context) :
                 null
             ).use { cursor ->
                 if (!cursor.moveToFirst()) return@use null
+                val version = cursor.getInt(1)
+                val ttlMinutes = cursor.getLong(2)
+                val savedSignature = cursor.getString(3) ?: ""
+                val savedAt = cursor.getLong(4)
+                if (!FeedCachePolicy.isValid(
+                        version, ttlMinutes, savedSignature, sourceSignature, savedAt, now
+                    )
+                ) {
+                    return@use null
+                }
                 json.decodeFromString<CachedFeed>(cursor.getString(0))
             }
         }.getOrNull()
     }
 
-    /** Store (or replace) the strip of [entry.key]. */
-    suspend fun write(entry: CachedFeed) = withContext(Dispatchers.IO) {
+    /** Store (or replace) the strip of [entry.key] with its invalidation metadata. */
+    suspend fun write(
+        entry: CachedFeed,
+        sourceSignature: String,
+        ttlMinutes: Long = FeedCachePolicy.FEED_TTL_MINUTES
+    ) = withContext(Dispatchers.IO) {
         runCatching {
             val values = ContentValues().apply {
                 put("key", entry.key)
                 put("payload", json.encodeToString(entry))
                 put("saved_at", entry.savedAt)
+                put("version", FeedCachePolicy.CACHE_VERSION)
+                put("ttl_minutes", ttlMinutes)
+                put("source_signature", sourceSignature)
             }
             writableDatabase.insertWithOnConflict(
                 "feed_cache",
@@ -135,12 +128,6 @@ class FeedCacheDb(context: Context) :
                 SQLiteDatabase.CONFLICT_REPLACE
             )
         }
-        Unit
-    }
-
-    /** Drop every cached strip (used when the sources are reconfigured). */
-    suspend fun clear() = withContext(Dispatchers.IO) {
-        runCatching { writableDatabase.delete("feed_cache", null, null) }
         Unit
     }
 }

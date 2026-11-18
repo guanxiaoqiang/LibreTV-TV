@@ -25,68 +25,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.libretv.tv.data.BadgeTag
-import com.libretv.tv.data.BadgeVisibility
-import com.libretv.tv.data.DoubanSubject
-import com.libretv.tv.data.TitleGroup
-
-/** Colour role of a small tag drawn on the poster. */
-enum class FeedBadgeKind { NEUTRAL, ACCENT, QUALITY, LATENCY }
-
-/**
- * One small tag on the poster.
- *
- * [tag] is the identity of the information the tag carries, so the settings
- * page can switch the year, the source count, the quality and the latency
- * independently.
- */
-data class FeedBadge(
-    val text: String,
-    val kind: FeedBadgeKind = FeedBadgeKind.NEUTRAL,
-    val tag: BadgeTag? = null
-)
-
-/**
- * One card in the unified home grid.
- *
- * Douban discoveries and all-source aggregated titles share exactly the same
- * poster + title layout; only the badges differ. [group] is set for aggregated
- * titles (multi-source -> picker, single-source -> detail), [subject] for
- * Douban discoveries (tap -> search every bundled source for that title).
- */
-data class FeedCard(
-    val key: String,
-    val title: String,
-    val poster: String,
-    val badges: List<FeedBadge> = emptyList(),
-    val cornerBadge: String? = null,
-    val group: TitleGroup? = null,
-    val subject: DoubanSubject? = null
-)
-
-internal fun shortLatency(ms: Long): String = when {
-    ms <= 0L -> "延时未知"
-    ms < 1000L -> "$ms ms"
-    else -> "%.1f s".format(ms / 1000.0)
-}
-
-/**
- * The one canonical renderer data for an aggregated title. Both the home feed
- * and the search results call this, so a card looks identical everywhere and
- * the year / source count / best quality / quickest latency tags never drift.
- */
-fun TitleGroup.asFeedCard(): FeedCard = FeedCard(
-    key = "g|$key",
-    title = title,
-    poster = poster,
-    badges = listOf(
-        FeedBadge(year.ifBlank { "年份未知" }, FeedBadgeKind.NEUTRAL, BadgeTag.YEAR),
-        FeedBadge("$playableCount 源", FeedBadgeKind.ACCENT, BadgeTag.SOURCES),
-        FeedBadge(bestQuality.short, FeedBadgeKind.QUALITY, BadgeTag.QUALITY),
-        FeedBadge(shortLatency(fastestMs), FeedBadgeKind.LATENCY, BadgeTag.LATENCY)
-    ),
-    group = this
-)
+import com.libretv.tv.domain.model.BadgeTag
+import com.libretv.tv.domain.model.BadgeVisibility
+import com.libretv.tv.domain.model.FeedBadge
+import com.libretv.tv.domain.model.FeedBadgeKind
+import com.libretv.tv.domain.model.FeedCard
 
 private fun badgeColor(kind: FeedBadgeKind): Color = when (kind) {
     FeedBadgeKind.NEUTRAL -> Color(0xFFE6EDF3)

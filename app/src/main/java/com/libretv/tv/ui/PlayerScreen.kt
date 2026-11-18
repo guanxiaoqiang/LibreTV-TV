@@ -31,7 +31,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,10 +67,17 @@ import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import com.libretv.tv.R
-import com.libretv.tv.data.AdFilterPlaylistParserFactory
-import com.libretv.tv.data.AdFilterStats
-import com.libretv.tv.data.CmsClient
-import com.libretv.tv.data.Episode
+import com.libretv.tv.core.USER_AGENT
+import com.libretv.tv.ui.player.AdFilterPlaylistParserFactory
+import com.libretv.tv.ui.player.AdFilterStats
+import com.libretv.tv.ui.player.failureKind
+import com.libretv.tv.domain.model.Episode
+import com.libretv.tv.domain.model.PlaybackRecovery
+import com.libretv.tv.domain.model.RecoveryAction
+import com.libretv.tv.domain.model.SkipDecision
+import com.libretv.tv.domain.model.SkipMark
+import com.libretv.tv.domain.model.SkipMarks
+import com.libretv.tv.domain.model.SkipSegment
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -118,10 +128,31 @@ fun PlayerScreen(
     onBack: () -> Unit,
     onNextEpisode: (() -> Unit)? = null,
     onPrevEpisode: (() -> Unit)? = null,
-    onSelectEpisode: ((Int) -> Unit)? = null
+    onSelectEpisode: ((Int) -> Unit)? = null,
+    /** 换源续播的进度比例（0..1）；仅换源后的第一次起播生效。 */
+    resumeRatio: Float = 0f,
+    /** 同片的其他可播来源，播放失败时按序自动尝试。 */
+    recoveryOffers: List<com.libretv.tv.domain.model.SourceOffer> = emptyList(),
+    /** 已经换过几个源了（换源会重建播放页，所以计数放在会话里）。 */
+    recoverySwitches: Int = 0,
+    /** 自动换源回调：参数为下一个 offer、当前进度比例与当前集数下标。 */
+    onSwitchSource: ((com.libretv.tv.domain.model.SourceOffer, Float, Int) -> Unit)? = null,
+    /** 播放失败上报：计入源健康度。 */
+    onPlaybackFailure: ((String) -> Unit)? = null,
+    /** 跳过标记总开关（设置页）。 */
+    skipMarksEnabled: Boolean = true,
+    /** 当前影片的跳过标记。 */
+    skipMark: SkipMark? = null,
+    /** 保存跳过标记。 */
+    onSaveSkipMark: (SkipMark) -> Unit = {},
+    /** 自动换源用尽后，观众手动选源的入口。 */
+    onManualSourcePick: (() -> Unit)? = null,
+    /** 一次性状态提示（例如「已切换到 XX 源」）。 */
+    statusNotice: String? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
 
     var errorText by remember { mutableStateOf<String?>(null) }
     var panelVisible by remember { mutableStateOf(true) }
@@ -133,6 +164,12 @@ fun PlayerScreen(
     var buffering by remember { mutableStateOf(false) }
     var speedIndex by remember { mutableIntStateOf(0) }
     var muted by remember { mutableStateOf(false) }
+
+    // 跳过标记：面板可见性与自动跳过提示。
+    var skipSheetVisible by remember { mutableStateOf(false) }
+    var skipNotice by remember { mutableStateOf<String?>(null) }
+    // 换源提示（「已切换到 XX 源」）。
+    var statusMessage by remember { mutableStateOf<String?>(null) }
 
     // Bumped whenever the user does something, which restarts the auto-hide
     // timer for the control panel.
@@ -152,7 +189,7 @@ fun PlayerScreen(
     // before it is parsed, which is where LibreTV's ad-slice filter belongs.
     val player = remember(playUrl, adFilterEnabled) {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(CmsClient.USER_AGENT)
+            .setUserAgent(USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
         val mediaItem = MediaItem.fromUri(playUrl)
         val mediaSource = if (playUrl.contains(".m3u8", ignoreCase = true)) {
@@ -180,12 +217,52 @@ fun PlayerScreen(
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                errorText = "播放失败：${error.errorCodeName}"
-            }
+            var sameSourceRetried = false
+            var resumeApplied = false
 
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING
+                // 换源后的进度按新时长换算；只有第一次 READY 生效。
+                if (state == Player.STATE_READY && !resumeApplied && resumeRatio > 0f) {
+                    resumeApplied = true
+                    val target = (player.duration * resumeRatio).toLong()
+                    if (target > 0L) player.seekTo(target)
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                onPlaybackFailure?.invoke(error.errorCodeName)
+                // 恢复策略在领域层：同源重试一次 → 换下一个 offer（最多 3 个）
+                // → 都不行才把错误交给观众。
+                val action = PlaybackRecovery.plan(
+                    kind = error.failureKind(),
+                    sameSourceRetried = sameSourceRetried,
+                    offers = recoveryOffers,
+                    triedCount = recoverySwitches,
+                    positionMs = player.currentPosition,
+                    durationMs = player.duration,
+                    episodeIndex = currentEpisodeIndex
+                )
+                when (action) {
+                    is RecoveryAction.RetrySameSource -> {
+                        sameSourceRetried = true
+                        val resumeAt = player.currentPosition
+                        scope.launch {
+                            delay(action.delayMs)
+                            player.seekTo(resumeAt)
+                            player.prepare()
+                            player.play()
+                        }
+                    }
+
+                    is RecoveryAction.SwitchSource -> {
+                        onSwitchSource?.invoke(action.offer, action.resumeRatio, action.episodeIndex)
+                    }
+
+                    is RecoveryAction.GiveUp -> {
+                        errorText = action.message
+                    }
+                }
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -217,6 +294,11 @@ fun PlayerScreen(
     // Poll the playback state for the readout. 400 ms is fine for a TV
     // progress bar and keeps the UI smooth on low-end hardware. The history
     // write is throttled to roughly every five seconds.
+    //
+    // The same loop watches the skip marks: when the playhead enters a marked
+    // range it jumps straight to the end of that range. The jump is
+    // self-limiting — after the seek the playhead sits outside the range, so
+    // it cannot loop.
     LaunchedEffect(player) {
         var ticks = 0
         while (true) {
@@ -227,8 +309,36 @@ fun PlayerScreen(
             if (ticks % 12 == 0 && durationMs > 0L) {
                 onProgress(positionMs, durationMs)
             }
+            if (skipMarksEnabled) {
+                val decision = SkipMarks.decide(
+                    globalEnabled = true,
+                    positionMs = positionMs,
+                    segments = skipMark?.segments.orEmpty()
+                )
+                if (decision is SkipDecision.SkipTo && decision.targetMs > positionMs) {
+                    player.seekTo(decision.targetMs)
+                    skipNotice = "已跳过${skipKindLabel(decision.segment.kind)}"
+                }
+            }
             ticks++
             kotlinx.coroutines.delay(400)
+        }
+    }
+
+    // 自动跳过的提示只停一会儿，别挡住画面。
+    LaunchedEffect(skipNotice) {
+        if (skipNotice != null) {
+            kotlinx.coroutines.delay(2500)
+            skipNotice = null
+        }
+    }
+
+    // 换源提示同理：换源会重建播放页，所以提示由外部传进来。
+    LaunchedEffect(statusNotice) {
+        if (statusNotice != null) {
+            statusMessage = statusNotice
+            kotlinx.coroutines.delay(3000)
+            statusMessage = null
         }
     }
 
@@ -440,11 +550,12 @@ fun PlayerScreen(
                 message = errorText!!,
                 onRetry = { retry() },
                 onBack = onBack,
+                onManualSourcePick = onManualSourcePick,
                 modifier = Modifier.align(Alignment.Center)
             )
         }
 
-        if (panelVisible && errorText == null && !episodePickerVisible) {
+        if (panelVisible && errorText == null && !episodePickerVisible && !skipSheetVisible) {
             ControlPanel(
                 title = title,
                 episodeName = episodeName,
@@ -457,6 +568,7 @@ fun PlayerScreen(
                 hasPrev = onPrevEpisode != null,
                 hasNext = onNextEpisode != null,
                 hasEpisodePicker = onSelectEpisode != null && episodes.size > 1,
+                skipSegments = skipMark?.segments.orEmpty(),
                 onSeek = { target ->
                     player.seekTo(target.coerceIn(0L, durationMs.coerceAtLeast(0L)))
                     interactionTick++
@@ -470,8 +582,94 @@ fun PlayerScreen(
                     episodePickerVisible = true
                     interactionTick++
                 },
+                onOpenSkipMarks = {
+                    skipSheetVisible = true
+                    interactionTick++
+                },
                 onBack = onBack,
                 modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+
+        // 跳过标记面板。
+        if (skipSheetVisible) {
+            val titleKey = remember(title) { SkipMarks.keyOf(title) }
+            SkipMarkSheet(
+                title = title,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                mark = skipMark,
+                onMarkIntro = {
+                    onSaveSkipMark(
+                        SkipMarks.upsert(
+                            skipMark ?: SkipMark(titleKey = titleKey, title = title),
+                            SkipMarks.markIntro(positionMs),
+                            System.currentTimeMillis()
+                        )
+                    )
+                },
+                onMarkOutro = {
+                    onSaveSkipMark(
+                        SkipMarks.upsert(
+                            skipMark ?: SkipMark(titleKey = titleKey, title = title),
+                            SkipMarks.markOutro(positionMs, durationMs),
+                            System.currentTimeMillis()
+                        )
+                    )
+                },
+                onMarkMiddle = { startMs, endMs ->
+                    onSaveSkipMark(
+                        SkipMarks.upsert(
+                            skipMark ?: SkipMark(titleKey = titleKey, title = title),
+                            SkipMarks.markMiddle(startMs, endMs),
+                            System.currentTimeMillis()
+                        )
+                    )
+                },
+                onAdjust = { segment, edge, delta ->
+                    val base = skipMark ?: SkipMark(titleKey = titleKey, title = title)
+                    val adjusted = SkipMarks.adjust(segment, edge, delta, System.currentTimeMillis())
+                    onSaveSkipMark(SkipMarks.upsert(base, adjusted, System.currentTimeMillis()))
+                },
+                onUndo = { kind ->
+                    val base = skipMark
+                    if (base != null) {
+                        onSaveSkipMark(SkipMarks.remove(base, kind, System.currentTimeMillis()))
+                    }
+                },
+                onPreview = { segment ->
+                    player.seekTo(segment.endMs.coerceIn(0L, durationMs.coerceAtLeast(0L)))
+                    interactionTick++
+                },
+                onClose = {
+                    skipSheetVisible = false
+                    interactionTick++
+                },
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+
+        // 自动跳过的提示。
+        skipNotice?.let { notice ->
+            Text(
+                notice,
+                color = TvColors.Primary,
+                fontSize = 14.sp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 96.dp)
+            )
+        }
+
+        // 换源提示。
+        statusMessage?.let { message ->
+            Text(
+                message,
+                color = TvColors.Primary,
+                fontSize = 14.sp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 96.dp)
             )
         }
 
@@ -555,6 +753,7 @@ private fun ControlPanel(
     hasPrev: Boolean,
     hasNext: Boolean,
     hasEpisodePicker: Boolean,
+    skipSegments: List<SkipSegment>,
     onSeek: (Long) -> Unit,
     onTogglePlay: () -> Unit,
     onPrev: (() -> Unit)?,
@@ -562,12 +761,13 @@ private fun ControlPanel(
     onCycleSpeed: () -> Unit,
     onToggleMute: () -> Unit,
     onOpenEpisodes: () -> Unit,
+    onOpenSkipMarks: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Button ids in visual order; the requester list is parallel to it.
     val barRequester = remember { FocusRequester() }
-    val buttonRequesters = remember { List(7) { FocusRequester() } }
+    val buttonRequesters = remember { List(8) { FocusRequester() } }
 
     // Which logical button occupies which slot. The play button is always
     // first so the focus chain stays stable no matter which optional
@@ -579,6 +779,7 @@ private fun ControlPanel(
         add("speed")
         add("mute")
         if (hasEpisodePicker) add("episodes")
+        add("marks")
         add("back")
     }
     val playSlot = slots.indexOf("play")
@@ -587,6 +788,7 @@ private fun ControlPanel(
     val speedSlot = slots.indexOf("speed")
     val muteSlot = slots.indexOf("mute")
     val episodesSlot = slots.indexOf("episodes")
+    val marksSlot = slots.indexOf("marks")
     val backSlot = slots.indexOf("back")
     val lastSlot = slots.lastIndex
 
@@ -633,6 +835,7 @@ private fun ControlPanel(
             positionMs = positionMs,
             durationMs = durationMs,
             bufferedMs = bufferedMs,
+            skipSegments = skipSegments,
             onSeek = onSeek,
             modifier = Modifier
                 .fillMaxWidth()
@@ -719,6 +922,16 @@ private fun ControlPanel(
             }
 
             PanelButton(
+                label = "标记",
+                requester = buttonRequesters[marksSlot],
+                chain = buttonRequesters,
+                slot = marksSlot,
+                lastSlot = lastSlot,
+                bar = barRequester,
+                onClick = onOpenSkipMarks
+            )
+
+            PanelButton(
                 label = "返回",
                 requester = buttonRequesters[backSlot],
                 chain = buttonRequesters,
@@ -744,6 +957,7 @@ private fun SeekBar(
     positionMs: Long,
     durationMs: Long,
     bufferedMs: Long,
+    skipSegments: List<SkipSegment>,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -814,6 +1028,23 @@ private fun SeekBar(
                     .height(if (focused) 10.dp else 6.dp)
                     .background(TvColors.Primary)
             )
+            // Marked ranges: the viewer sees where the player will jump.
+            skipSegments.forEach { segment ->
+                val start = (segment.startMs.toFloat() / duration).coerceIn(0f, 1f)
+                val end = (segment.endMs.toFloat() / duration).coerceIn(0f, 1f)
+                if (end > start) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(end - start)
+                            .align(Alignment.CenterStart)
+                            .offset {
+                                IntOffset((start * widthPx).roundToInt(), 0)
+                            }
+                            .height(if (focused) 10.dp else 6.dp)
+                            .background(TvColors.Warning.copy(alpha = 0.85f))
+                    )
+                }
+            }
         }
 
         // Thumb
@@ -1026,10 +1257,12 @@ private fun PlaybackErrorOverlay(
     message: String,
     onRetry: () -> Unit,
     onBack: () -> Unit,
+    onManualSourcePick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val retryRequester = remember { FocusRequester() }
     val backRequester = remember { FocusRequester() }
+    val pickRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
         retryRequester.requestFocusSafely()
@@ -1095,6 +1328,32 @@ private fun PlaybackErrorOverlay(
                         color = if (f) Color(0xFF14181D) else TvColors.OnSurface,
                         fontSize = 13.sp
                     )
+                }
+            }
+            // 自动换源用尽之后，手动选源是观众最后的自救手段。
+            if (onManualSourcePick != null) {
+                FocusableTile(
+                    onClick = onManualSourcePick,
+                    modifier = Modifier
+                        .focusRequester(pickRequester)
+                        .focusProperties {
+                            this.next = retryRequester
+                            this.previous = retryRequester
+                        }
+                ) { f ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (f) TvColors.Primary else TvColors.SurfaceHigh)
+                            .tvFocusable(f, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 18.dp, vertical = 9.dp)
+                    ) {
+                        Text(
+                            "手动选源",
+                            color = if (f) Color(0xFF14181D) else TvColors.OnSurface,
+                            fontSize = 13.sp
+                        )
+                    }
                 }
             }
         }

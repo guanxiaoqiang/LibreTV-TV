@@ -1,5 +1,6 @@
 package com.libretv.tv.data
 
+import com.libretv.tv.core.M3u8AdFilter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
