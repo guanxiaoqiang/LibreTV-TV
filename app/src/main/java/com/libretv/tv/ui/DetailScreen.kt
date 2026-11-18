@@ -50,7 +50,10 @@ fun DetailScreen(
     offer: SourceOffer? = null,
     onSwitchSource: (() -> Unit)? = null,
     alternatives: List<SourceOffer> = emptyList(),
-    onPickAlternative: ((SourceOffer) -> Unit)? = null
+    onPickAlternative: ((SourceOffer) -> Unit)? = null,
+    /** 是否已收藏（按归一化片名，跨来源同步）。 */
+    isFavorite: Boolean = false,
+    onToggleFavorite: (() -> Unit)? = null
 ) {
     if (detail == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -211,6 +214,33 @@ fun DetailScreen(
                     }
                 }
                 return@Column
+            }
+
+            // 收藏按钮（4.6）：收藏状态按归一化片名跨来源同步，取消即时生效。
+            if (onToggleFavorite != null) {
+                FocusableTile(onClick = onToggleFavorite) { f ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                when {
+                                    isFavorite && f -> TvColors.Primary
+                                    isFavorite -> TvColors.Primary.copy(alpha = 0.75f)
+                                    f -> TvColors.SurfaceHigh
+                                    else -> TvColors.Surface
+                                }
+                            )
+                            .tvFocusable(f, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 18.dp, vertical = 9.dp)
+                    ) {
+                        Text(
+                            if (isFavorite) "★ 已收藏" else "☆ 收藏",
+                            color = if (isFavorite) Color(0xFF14181D) else TvColors.OnSurface,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
             }
 
             Text("播放线路（左右键切换）", color = TvColors.OnSurface, fontSize = 15.sp, fontWeight = FontWeight.Medium)

@@ -27,7 +27,15 @@ class WatchHistoryStore(context: Context) : com.libretv.tv.domain.gateway.Histor
     companion object {
         private val PREFS = StorageKeys.WATCH_HISTORY
         private val KEY = StorageKeys.WatchHistory.RECORDS
-        private const val MAX_RECORDS = 40
+        // local-first-storage 4.7：上限从 40 提升到 200，支撑长期积累。
+        private const val MAX_RECORDS = 200
+
+        /**
+         * 按更新时间倒序保留最新的 [limit] 条（4.7）。抽成纯函数便于 JVM 单测
+         * 验证「最新在前、最旧被淘汰」，不依赖 Android Context。
+         */
+        fun retainNewest(list: List<WatchRecord>, limit: Int = MAX_RECORDS): List<WatchRecord> =
+            list.sortedByDescending { it.updatedAt }.take(limit)
     }
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -58,7 +66,7 @@ class WatchHistoryStore(context: Context) : com.libretv.tv.domain.gateway.Histor
     }
 
     private fun commit(list: List<WatchRecord>) {
-        val sorted = list.sortedByDescending { it.updatedAt }.take(MAX_RECORDS)
+        val sorted = retainNewest(list)
         prefs.edit().putString(KEY, json.encodeToString(sorted)).apply()
         _records.value = sorted
     }
@@ -70,7 +78,11 @@ class WatchHistoryStore(context: Context) : com.libretv.tv.domain.gateway.Histor
      */
     override fun upsert(record: WatchRecord) {
         if (record.key.isBlank()) return
-        val normalized = if (record.isFinished()) record.copy(positionMs = 0L) else record
+        // 4.1：归一化片名作为跨来源聚合键；缺省时按标题兜底。播放地址仅作快照。
+        val withTitleKey = if (record.titleKey.isBlank()) {
+            record.copy(titleKey = com.libretv.tv.domain.model.normalizeTitle(record.title))
+        } else record
+        val normalized = if (withTitleKey.isFinished()) withTitleKey.copy(positionMs = 0L) else withTitleKey
         val kept = _records.value.filterNot { it.key == normalized.key }
         commit(listOf(normalized) + kept)
     }

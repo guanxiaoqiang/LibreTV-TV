@@ -29,6 +29,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.History
@@ -125,8 +126,10 @@ internal fun HomeLayout(
     homeState: HomeState,
     history: List<WatchRecord>,
     badgeVisibility: BadgeVisibility,
+    online: Boolean = true,
     onSearch: () -> Unit,
     onSources: () -> Unit,
+    onFavorites: () -> Unit,
     onSelectTab: (HomeTab) -> Unit,
     onRailFocus: (Int) -> Unit,
     onSelectGenre: (String) -> Unit,
@@ -154,6 +157,7 @@ internal fun HomeLayout(
             tabs.forEach { tab ->
                 add(RailEntry(label = tab.label, icon = tabIcon(tab), tab = tab))
             }
+            add(RailEntry("收藏", icon = Icons.Filled.Favorite, action = 2))
             add(RailEntry("设置", icon = Icons.Filled.Settings, action = 1))
         }
     }
@@ -229,8 +233,17 @@ internal fun HomeLayout(
                 color = TvColors.OnSurface,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(start = 12.dp, bottom = 12.dp)
+                modifier = Modifier.padding(start = 12.dp, bottom = if (online) 12.dp else 2.dp)
             )
+            // 7.4：断网冷启动时明确提示当前为离线状态，展示的是上次缓存内容。
+            if (!online) {
+                Text(
+                    "离线 · 本地内容",
+                    color = TvColors.Warning,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(start = 12.dp, bottom = 8.dp)
+                )
+            }
 
             railEntries.forEachIndexed { index, entry ->
                 FocusableTile(
@@ -238,6 +251,7 @@ internal fun HomeLayout(
                         when {
                             entry.action == 0 -> onSearch()
                             entry.action == 1 -> onSources()
+                            entry.action == 2 -> onFavorites()
                             // Clicking a tab does two things: switch the content
                             // page, and hand focus to its top chip strip. BACK
                             // from there returns to this exact rail slot.

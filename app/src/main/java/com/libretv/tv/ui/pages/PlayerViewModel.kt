@@ -4,9 +4,11 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.libretv.tv.di.AppContainer
+import com.libretv.tv.domain.model.ProgressThrottle
 import com.libretv.tv.domain.model.PlayRequest
 import com.libretv.tv.domain.model.SourceOffer
 import com.libretv.tv.domain.model.WatchRecord
+import com.libretv.tv.domain.model.normalizeTitle
 import com.libretv.tv.ui.nav.Routes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,20 +41,26 @@ class PlayerViewModel(
     fun update(request: PlayRequest) {
         handle[Routes.ARG_REQUEST] = Routes.encodeRequestForState(request)
         _request.value = request
+        // 切集/换源：新条目第一次上报进度即可落库，不被上一集的节流状态挡住。
+        progressThrottle.reset()
     }
+
+    /** 进度写入节流器：位置抖动不落盘，切集/退出强制补写。 */
+    private val progressThrottle = ProgressThrottle()
 
     /**
      * 保存进度。
      *
-     * 只在播放超过 10 秒后才落盘：起播的几秒没有保存价值，却会让历史列表
-     * 里塞满「刚刚打开过」的条目。
+     * 4.2：仅在播放超过 10 秒、且位置相对上次落库变化超过 5 秒时写盘；
+     * 切集（key 变化）或 [force]（退出补写）不受节流限制。
      */
-    fun saveProgress(request: PlayRequest, positionMs: Long, durationMs: Long) {
-        if (positionMs <= 10_000L) return
+    fun saveProgress(request: PlayRequest, positionMs: Long, durationMs: Long, force: Boolean = false) {
+        if (!progressThrottle.shouldWrite(request.historyKey, positionMs, force)) return
         viewModelScope.launch {
             container.history.upsert(
                 WatchRecord(
                     key = request.historyKey,
+                    titleKey = normalizeTitle(request.title),
                     title = request.title,
                     poster = request.poster,
                     sourceName = request.sourceName,

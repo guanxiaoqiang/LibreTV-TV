@@ -106,6 +106,32 @@ class FeedCacheDb(context: Context) :
         }.getOrNull()
     }
 
+    /**
+     * 逐行读出全部缓存（含失效元数据），供一次性迁移到 Room 的 http_cache 表。
+     * 迁移需求 2.1：旧载荷一行不丢，版本与有效期字段在搬运时补齐。
+     */
+    suspend fun allRows(): List<Triple<CachedFeed, String, Long>> = withContext(Dispatchers.IO) {
+        runCatching {
+            readableDatabase.query(
+                "feed_cache",
+                arrayOf("payload", "saved_at", "ttl_minutes", "source_signature"),
+                null, null, null, null, null
+            ).use { cursor ->
+                val rows = mutableListOf<Triple<CachedFeed, String, Long>>()
+                while (cursor.moveToNext()) {
+                    runCatching {
+                        Triple(
+                            json.decodeFromString<CachedFeed>(cursor.getString(0)),
+                            cursor.getString(3) ?: "",
+                            cursor.getLong(2)
+                        )
+                    }.getOrNull()?.let { rows += it }
+                }
+                rows
+            }
+        }.getOrDefault(emptyList())
+    }
+
     /** Store (or replace) the strip of [entry.key] with its invalidation metadata. */
     suspend fun write(
         entry: CachedFeed,

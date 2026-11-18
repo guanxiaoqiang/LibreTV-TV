@@ -113,6 +113,19 @@ class AppSettings(context: Context) {
         get() = prefs.getBoolean(KEY_SKIP_MARKS, true)
         set(value) = prefs.edit().putBoolean(KEY_SKIP_MARKS, value).apply()
 
+    /**
+     * 后台采集总开关（7.2）。关闭后所有目录/搜索补采都不再触发请求；
+     * 默认开启，但仅按 [harvestIntensity] 决定的时机执行。
+     */
+    var harvestEnabled: Boolean
+        get() = prefs.getBoolean(KEY_HARVEST_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_HARVEST_ENABLED, value).apply()
+
+    /** 采集强度：默认仅在应用运行时（RUNNING_ONLY）。 */
+    var harvestIntensity: HarvestIntensity
+        get() = HarvestIntensity.fromInt(prefs.getInt(KEY_HARVEST_INTENSITY, 0))
+        set(value) = prefs.edit().putInt(KEY_HARVEST_INTENSITY, value.code).apply()
+
     private companion object {
         val KEY_AD_FILTER = StorageKeys.Settings.AD_FILTER
         val KEY_POSTER_BADGES = StorageKeys.Settings.POSTER_BADGES
@@ -123,5 +136,18 @@ class AppSettings(context: Context) {
         val KEY_BADGE_DOUBAN = StorageKeys.Settings.BADGE_DOUBAN
         val KEY_LOG_LEVEL = StorageKeys.Settings.LOG_LEVEL
         val KEY_SKIP_MARKS = StorageKeys.Settings.SKIP_MARKS
+        val KEY_HARVEST_ENABLED = StorageKeys.Settings.HARVEST_ENABLED
+        val KEY_HARVEST_INTENSITY = StorageKeys.Settings.HARVEST_INTENSITY
+    }
+}
+
+/** 后台采集强度（7.2）：决定触发时机与频率。 */
+enum class HarvestIntensity(val code: Int, val label: String) {
+    RUNNING_ONLY(0, "仅应用运行时"),
+    PERIODIC(1, "定期执行"),
+    AGGRESSIVE(2, "积极采集");
+
+    companion object {
+        fun fromInt(code: Int): HarvestIntensity = entries.firstOrNull { it.code == code } ?: RUNNING_ONLY
     }
 }

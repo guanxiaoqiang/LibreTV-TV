@@ -20,6 +20,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val SOURCES = "sources"
     const val SKIP_MARKS = "skipMarks"
+    const val FAVORITES = "favorites"
 
     /** 播放页的路由参数名：序列化的 [PlayRequest]。 */
     const val ARG_REQUEST = "request"

@@ -125,6 +125,8 @@ fun PlayerScreen(
     startPositionMs: Long = 0L,
     adFilterEnabled: Boolean = true,
     onProgress: (positionMs: Long, durationMs: Long) -> Unit = { _, _ -> },
+    /** 退出/换集时的最终进度补写（强制落库，不受节流限制）。 */
+    onProgressFinal: (positionMs: Long, durationMs: Long) -> Unit = onProgress,
     onBack: () -> Unit,
     onNextEpisode: (() -> Unit)? = null,
     onPrevEpisode: (() -> Unit)? = null,
@@ -285,8 +287,9 @@ fun PlayerScreen(
             player.removeListener(listener)
             // Report the last position before releasing the player. This is
             // also what saves the outgoing episode when the viewer switches
-            // to the next one.
-            onProgress(player.currentPosition, player.duration)
+            // to the next one. Force-write so throttling never drops the last
+            // position (4.2 退出补写).
+            onProgressFinal(player.currentPosition, player.duration)
             player.release()
         }
     }

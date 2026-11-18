@@ -379,6 +379,27 @@ TV 场景断网常见。要求：
 
 ---
 
+## 12.5 实现落点（缓存层设计说明，任务 3.7）
+
+本文前面各节是**设计**；下表把三态语义、TTL 分级与失效矩阵映射到本变更的**代码落点**，便于 code review 时逐条确认设计未漂移：
+
+| 设计项 | 本文位置 | 代码落点 |
+|---|---|---|
+| 结构化数据 / 载荷分表（D12） | §2.1 / §3 | `data/local/room/Entities.kt`：`watch_record`/`favorite`/`source_health` 用列，`http_cache.payload` 用 JSON |
+| 播放地址不落盘（D5） | §3 / §5 | Room 全部实体无播放地址字段；目录 `catalog_episode` 只存 `episodeName` |
+| 三态语义（D3） | §5 | `domain/model/CacheResult.kt` + `CacheFreshness.judge()`；`RoomCacheGateway.read()` 组装三态 |
+| 有效性判定 | §5 / §7 | `CacheFreshness.isValid()`（保存时间 + TTL、版本、来源签名三项） |
+| TTL 分级 | §6 | `domain/model/FeedCachePolicy.kt`（feed 6h/24h）+ 缓存写入时传软/硬 TTL |
+| 失效矩阵（D4） | §7 | `domain/model/CacheInvalidation.kt`：签名型 / 前缀型 / 版本型三类事件 |
+| 后台刷新去重与失败不降级 | §8.2 | `core/BackgroundRefresher.kt`：按 kind 去重、onFailure 只上报 |
+| 配额隔离 | §8 / content-catalog §2.3 | `core/HarvestQuota.kt`：并发 2、每源每小时上限、用户请求让路 |
+| 启动清理过期行 + 总量上限 | §12 | `RoomCacheGateway.prune()`：deleteExpired + trimTo；AppContainer init 触发 |
+| 无害的旧数据保留 | §4 规则 3 | `LegacyMigrator`：回填后置 `MIGRATED_TO_DB`，SP / feed_cache.db 原件不删 |
+
+设计语义与代码一一对应；任一侧调整时须同步另一侧与本表。
+
+---
+
 ## 13. 风险
 
 | 风险 | 缓解 |

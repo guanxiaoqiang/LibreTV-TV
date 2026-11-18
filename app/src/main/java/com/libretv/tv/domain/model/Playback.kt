@@ -53,11 +53,7 @@ data class PlayRequest(
 ) {
     /** Stable identity of one watched episode across sessions. */
     val historyKey: String
-        get() = if (vodId.isNotBlank()) {
-            "$sourceName|$vodId|$lineIndex|$episodeIndex"
-        } else {
-            "$title|$episodeName|$rawUrl"
-        }
+        get() = WatchKeys.episodeKey(sourceName, vodId, lineIndex, episodeIndex, title, episodeName, rawUrl)
 
     /** 按新时长把比例换算回毫秒。 */
     fun resumePositionMs(newDurationMs: Long): Long =

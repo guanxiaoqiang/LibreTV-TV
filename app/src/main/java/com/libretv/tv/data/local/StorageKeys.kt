@@ -31,7 +31,7 @@ object StorageKeys {
     /** 用户设置（广告过滤、海报角标、日志级别）。 */
     const val SETTINGS = "libretv_settings"
 
-    /** 观看历史（JSON 数组，上限 40 条）。 */
+    /** 观看历史（JSON 数组，上限 200 条）。 */
     const val WATCH_HISTORY = "libretv_watch_history"
 
     /** 搜索历史（JSON 数组，上限 12 条）。 */
@@ -42,6 +42,17 @@ object StorageKeys {
 
     /** 收藏（JSON 数组，键为归一化片名）。 */
     const val FAVORITES = "libretv_favorites"
+
+    /**
+     * 一次性回填标记所在的文件（local-first-storage 2.2 / 2.4）。
+     *
+     * 迁移完成置 true；复位（回滚）时清掉它即可回到旧读写路径。SP 原件
+     * 全程保留，不删除——出问题可以回退，旧数据一份都不能丢。
+     */
+    const val MIGRATION_STATE = "libretv_migration"
+
+    /** 是否已把 SP + 旧 feed_cache.db 回填进 Room。 */
+    const val MIGRATED_TO_DB = "migrated_to_db"
 
     // ---------- libretv_sources 内部键 ----------
 
@@ -76,6 +87,12 @@ object StorageKeys {
 
         /** 跳过标记总开关。 */
         const val SKIP_MARKS = "skip_marks_enabled"
+
+        /** 后台采集总开关（默认开）。 */
+        const val HARVEST_ENABLED = "harvest_enabled"
+
+        /** 采集强度：0=仅应用运行时、1=定期、2=激进（默认 0）。 */
+        const val HARVEST_INTENSITY = "harvest_intensity"
     }
 
     // ---------- libretv_watch_history / libretv_search_history 内部键 ----------

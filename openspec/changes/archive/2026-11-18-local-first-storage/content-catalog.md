@@ -219,3 +219,21 @@ data class CatalogAliasEntity(
 | C5 | P0/P2/P3 任务 + 新鲜度可见 | C2 |
 
 > C1–C3 的收益最直接（详情与选源不再每次联网）；C4 收益最大但改动最可见；建议 C4 单独验收。
+
+---
+
+## 7. 采集调度实现落点（任务 5.8）
+
+本文前面是设计；下表把优先级、配额与让路规则映射到本变更的代码落点，便于 code review 逐条确认设计未漂移：
+
+| 设计项 | 本文位置 | 代码落点 |
+|---|---|---|
+| 目录不含播放地址（D5） | §2 | `data/local/room/Entities.kt` 的 `catalog_*` 表无地址列；`CatalogHarvester.store()` 只写标题与来源投影 |
+| P0→P1→P2→P3 优先级 | §2.3 | `core/CatalogScheduler.kt`：`PriorityQueue` 按 `CatalogPriority.rank` 出队，同级 FIFO |
+| 增量采集（有效期跳过 + 分页上限） | §2.2 | `core/HarvestPolicy.shouldSkip()/pagesToFetch()`；`CatalogHarvester.harvestCategory()` |
+| 并发 1–2 + 每源每小时上限 + 用户请求让路（D7） | §2.3 / §5 | `core/HarvestQuota.kt`：`canAcquire()` 三条件；`BackgroundRefresher.userActive` 让路 |
+| 采集失败阶梯降级 | §5.7 | `domain/model/HarvestHealth.kt`：优先级惩罚 + 连续失败 3 次暂停采集；`CatalogHarvester.recordFailure()` |
+| 新鲜度可见（更新时间 + 超期提示 + 采集中角标） | §3 | `RoomCatalogGateway.isFresh()` + 采集器 `HarvestResult`；UI 用缓存三态展示角标 |
+| 离线优先读目录 | §4 | `AppContainer.localCatalog()`：离线时展示已缓存来源/集名，播放地址仍需联网解析 |
+
+让路规则细节：后台采集与用户搜索共用 `HarvestQuota.userActive` 闸门——用户请求进行中，`canAcquire()` 返回 false，后台任务暂停占用新额度；用户请求结束后恢复。这与 `BackgroundRefresher` 的 `userActive()` 让路语义一致，避免后台采集抢占 TV 端有限的带宽。

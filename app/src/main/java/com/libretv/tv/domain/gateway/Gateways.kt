@@ -59,16 +59,16 @@ interface ContentGateway {
  *
  * 历史是纯本地数据；换持久化实现（SP → Room）时 ViewModel 不受影响。
  */
-interface HistoryGateway {
+interface HistoryGateway : WatchHistoryGateway {
     /** 全部观看记录（按最近观看排序）。 */
-    val records: kotlinx.coroutines.flow.StateFlow<List<com.libretv.tv.data.WatchRecord>>
+    override val records: kotlinx.coroutines.flow.StateFlow<List<com.libretv.tv.data.WatchRecord>>
 
     /** 插入或更新一条进度；看完的记录下次从 0 开始。 */
-    fun upsert(record: com.libretv.tv.data.WatchRecord)
+    override fun upsert(record: com.libretv.tv.data.WatchRecord)
 
     /** 删除单条记录。 */
-    fun delete(key: String)
+    override fun delete(key: String)
 
     /** 清空全部历史。 */
-    fun clear()
+    override fun clear()
 }

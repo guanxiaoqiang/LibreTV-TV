@@ -19,11 +19,17 @@ import com.libretv.tv.data.local.BackupFiles
 import com.libretv.tv.data.local.FavoriteStore
 import com.libretv.tv.data.local.SkipMarkStore
 import com.libretv.tv.data.local.SubscriptionStore
+import com.libretv.tv.data.local.room.LegacyMigrator
+import com.libretv.tv.data.local.room.LibreTvDatabase
+import com.libretv.tv.data.local.room.RoomCacheGateway
+import com.libretv.tv.data.local.room.RoomCatalogGateway
 import com.libretv.tv.data.remote.CmsApiImpl
 import com.libretv.tv.data.remote.DoubanApiImpl
 import com.libretv.tv.data.remote.HttpEngine
 import com.libretv.tv.data.remote.SubscriptionApi
 import com.libretv.tv.data.remote.TvboxParser
+import com.libretv.tv.domain.gateway.CacheGateway
+import com.libretv.tv.domain.gateway.CatalogGateway
 import com.libretv.tv.domain.gateway.ContentGateway
 import com.libretv.tv.domain.gateway.HistoryGateway
 import com.libretv.tv.domain.gateway.SourceGateway
@@ -112,7 +118,11 @@ data class SettingsSnapshot(
     val adFilterEnabled: Boolean = true,
     val badgeVisibility: BadgeVisibility = BadgeVisibility(),
     val debugLogEnabled: Boolean = false,
-    val skipMarksEnabled: Boolean = true
+    val skipMarksEnabled: Boolean = true,
+    /** 后台采集总开关（7.2）。 */
+    val harvestEnabled: Boolean = true,
+    /** 采集强度（7.2）。 */
+    val harvestIntensity: com.libretv.tv.data.HarvestIntensity = com.libretv.tv.data.HarvestIntensity.RUNNING_ONLY
 )
 
 /**
@@ -147,6 +157,49 @@ class AppContainer(context: Context) {
 
     /** 首页卡片缓存。 */
     val feedCache = FeedCacheDb(app)
+
+    // ---------- unified persistence (local-first-storage) ----------
+
+    /** Room 统一数据库：历史/收藏/缓存/目录等结构化数据的落地。 */
+    val database = LibreTvDatabase.get(app)
+
+    /** 一次性回填器：把旧 SP 与 feed_cache.db 的数据搬进 Room（保留原件）。 */
+    val legacyMigrator = LegacyMigrator(app, database)
+
+    /** 基于 Room 的缓存网关（三态语义）。 */
+    val roomCache: CacheGateway = RoomCacheGateway(database)
+
+    /** 基于 Room 的内容目录网关。 */
+    val catalog: CatalogGateway = RoomCatalogGateway(database)
+
+    /** 后台刷新调度器（按 kind 去重、失败不降级、用户请求时让路）。 */
+    val backgroundRefresher = com.libretv.tv.core.BackgroundRefresher(
+        scope = scope,
+        userActive = { foregroundCount > 0 && searchSession.value.keyword.isNotBlank() }
+    )
+
+    /** 后台采集配额（并发 2、每源每小时 20、与用户请求隔离）。 */
+    val harvestQuota = com.libretv.tv.core.HarvestQuota(maxConcurrent = 2, perSourcePerHour = 20)
+
+    /** 采集任务优先级队列。 */
+    val catalogScheduler = com.libretv.tv.core.CatalogScheduler()
+
+    /** 本地优先搜索编排器（本地索引优先 + 扇出回退 + 补采追加）。 */
+    val localFirstSearch = com.libretv.tv.core.LocalFirstSearch()
+
+    /** 网络连通状态（7.4 离线提示）。 */
+    val networkMonitor = com.libretv.tv.core.NetworkMonitor(app)
+
+    /** 是否在线。 */
+    val online: StateFlow<Boolean> get() = networkMonitor.online
+
+    /** 内容目录增量采集器（首页标签目录增量入库）。 */
+    val catalogHarvester = com.libretv.tv.core.CatalogHarvester(
+        content = content,
+        catalog = catalog,
+        quota = harvestQuota,
+        scheduler = catalogScheduler
+    )
 
     /** 阶梯冷却台账。 */
     val healthLedger = SourceHealthLedger(SourceStore(app))
@@ -211,7 +264,9 @@ class AppContainer(context: Context) {
             adFilterEnabled = appSettings.adFilterEnabled,
             badgeVisibility = appSettings.badgeVisibility,
             debugLogEnabled = appSettings.debugLogEnabled,
-            skipMarksEnabled = appSettings.skipMarksEnabled
+            skipMarksEnabled = appSettings.skipMarksEnabled,
+            harvestEnabled = appSettings.harvestEnabled,
+            harvestIntensity = appSettings.harvestIntensity
         )
     )
     /** 应用级设置。 */
@@ -250,9 +305,18 @@ class AppContainer(context: Context) {
 
     init {
         Logger.level = appSettings.logLevel
+        // 一次性回填旧数据到 Room；失败不影响其它初始化，原件始终保留。
+        scope.launch {
+            runCatching { legacyMigrator.migrateIfNeeded() }
+                .onFailure { Logger.w("LegacyMigrator", "回填失败: ${it.message}") }
+        }
         scope.launch { loadSources() }
         refreshSubscriptions()
-        refreshSkipMarks()
+        // 启动时清理过期缓存行（local-first-storage 3.6），后台不阻塞首屏。
+        scope.launch {
+            runCatching { roomCache.prune() }
+                .onFailure { Logger.w("CachePrune", "清理失败: ${it.message}") }
+        }
     }
 
     // ---------- sources ----------
@@ -611,6 +675,7 @@ class AppContainer(context: Context) {
 
         // 收藏：按归一化片名合并后的结果整体写回。
         favoriteStore.replaceAll(plan.favorites)
+        refreshFavorites()
 
         if (options.importSettings) {
             setAdFilterEnabled(plan.settings.adFilterEnabled)
@@ -646,6 +711,12 @@ class AppContainer(context: Context) {
 
     private val _skipMarks = MutableStateFlow<List<SkipMark>>(emptyList())
 
+    // skipMarkStore / _skipMarks 声明在此处之后才初始化，所以加载必须放在
+    // 这个 init 块里；放到类顶部的 init 会因属性尚未初始化而 NPE。
+    init {
+        refreshSkipMarks()
+    }
+
     /** 全部跳过标记（管理页用）。 */
     val skipMarksState: StateFlow<List<SkipMark>> = _skipMarks.asStateFlow()
 
@@ -678,10 +749,81 @@ class AppContainer(context: Context) {
         _settings.value = _settings.value.copy(skipMarksEnabled = enabled)
     }
 
+    /** 开关后台采集（7.2）：关闭后采集器/补采不再触发网络请求。 */
+    fun setHarvestEnabled(enabled: Boolean) {
+        appSettings.harvestEnabled = enabled
+        harvestQuota.harvestEnabled = enabled
+        _settings.value = _settings.value.copy(harvestEnabled = enabled)
+    }
+
+    /** 切换采集强度。 */
+    fun setHarvestIntensity(intensity: com.libretv.tv.data.HarvestIntensity) {
+        appSettings.harvestIntensity = intensity
+        _settings.value = _settings.value.copy(harvestIntensity = intensity)
+    }
+
     // ---------- favorites ----------
+
+    private val _favorites = MutableStateFlow(favoriteStore.favorites())
+
+    /** 全部收藏（可观察，跨页面同步）。 */
+    val favoriteEntries: StateFlow<List<FavoriteEntry>> = _favorites.asStateFlow()
 
     /** 全部收藏。 */
     fun favorites(): List<FavoriteEntry> = favoriteStore.favorites()
+
+    /** 是否已收藏（按归一化片名）。 */
+    fun isFavorite(titleKey: String): Boolean = favoriteStore.favorites().any { it.titleKey == titleKey }
+
+    /** 收藏一部影片。 */
+    fun addFavorite(entry: FavoriteEntry) {
+        favoriteStore.save(entry)
+        refreshFavorites()
+    }
+
+    /** 取消收藏。 */
+    fun removeFavorite(titleKey: String) {
+        favoriteStore.remove(titleKey)
+        refreshFavorites()
+    }
+
+    private fun refreshFavorites() {
+        _favorites.value = favoriteStore.favorites()
+    }
+
+    // ---------- persistence / migration ----------
+
+    /** 数据是否已回填进 Room。 */
+    fun isMigratedToDb(): Boolean = legacyMigrator.isMigrated()
+
+    /**
+     * 回滚迁移标记（2.4）：复位后下次启动重新回填；SP 与旧 SQLite 原件
+     * 全程未删除，回到旧读写路径数据完整。
+     */
+    fun resetMigrationForRollback() = legacyMigrator.resetMigrationFlag()
+
+    /** 本地数据占用（缓存字节数 + 目录条目数），供设置页展示。 */
+    suspend fun storageUsage(): Pair<Long, Int> =
+        roomCache.sizeBytes() to catalog.count()
+
+    /**
+     * 从本地目录读取一部片子的来源与集名（5.5 离线优先）。
+     *
+     * 目录不含播放地址：离线时可展示"有哪些来源 / 多少集"，真正起播仍需
+     * 联网解析地址；调用方据此给出明确提示而非长时间等待。
+     */
+    suspend fun localCatalog(titleKey: String): LocalCatalogInfo {
+        val title = catalog.title(titleKey)
+        val offers = catalog.offers(titleKey)
+        return LocalCatalogInfo(
+            title = title,
+            offerCount = offers.size,
+            sources = offers.map { it.sourceName }
+        )
+    }
+
+    /** 清理缓存（不影响历史与收藏，3.6 / 7.3）。 */
+    suspend fun clearCacheOnly() = roomCache.clearAll()
 
     // ---------- settings ----------
 

@@ -23,6 +23,7 @@ import com.libretv.tv.ui.HomeLayout
 import com.libretv.tv.ui.PlayerScreen
 import com.libretv.tv.ui.ResultScreen
 import com.libretv.tv.ui.SearchScreen
+import com.libretv.tv.ui.FavoritesScreen
 import com.libretv.tv.ui.SettingsScreen
 import com.libretv.tv.ui.SkipMarksScreen
 import com.libretv.tv.ui.SourcePickerScreen
@@ -123,12 +124,15 @@ fun LibreNavHost(
             val homeState by homeVm.state.collectAsState()
             val settings by container.settings.collectAsState()
             val history by container.historyRecords.collectAsState()
+            val online by container.online.collectAsState()
             HomeLayout(
                 homeState = homeState,
                 history = history,
                 badgeVisibility = settings.badgeVisibility,
+                online = online,
                 onSearch = { navController.navigate(Routes.SEARCH) },
                 onSources = { navController.navigate(Routes.SETTINGS) },
+                onFavorites = { navController.navigate(Routes.FAVORITES) },
                 onSelectTab = { homeVm.setHomeTab(it) },
                 onRailFocus = { homeVm.setRailFocus(it) },
                 onSelectGenre = { homeVm.setGenre(it) },
@@ -206,6 +210,7 @@ fun LibreNavHost(
             val detailVm: DetailViewModel = containerViewModel(container) { DetailViewModel(it) }
             val session by detailVm.session.collectAsState()
             val detail = session.detail
+            val favoriteKeys by container.favoriteEntries.collectAsState()
             DetailScreen(
                 detail = detail,
                 loading = detail == null && session.error == null,
@@ -226,7 +231,29 @@ fun LibreNavHost(
                     container.pickerSession.value.group != null
                 ) {
                     { navController.popBackStack() }
-                } else null
+                } else null,
+                isFavorite = detail?.item?.vodName?.let {
+                    com.libretv.tv.domain.model.normalizeTitle(it) in favoriteKeys.map { f -> f.titleKey }
+                } ?: false,
+                onToggleFavorite = detail?.let { bundle ->
+                    {
+                        val titleKey = com.libretv.tv.domain.model.normalizeTitle(bundle.item.vodName)
+                        if (container.isFavorite(titleKey)) {
+                            container.removeFavorite(titleKey)
+                        } else {
+                            container.addFavorite(
+                                com.libretv.tv.domain.model.FavoriteEntry(
+                                    titleKey = titleKey,
+                                    title = bundle.item.vodName,
+                                    poster = bundle.item.vodPic,
+                                    sourceUrl = session.activeOffer?.sourceUrl ?: "",
+                                    vodId = session.activeOffer?.vodId ?: "",
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                        }
+                    }
+                }
             )
         }
 
@@ -262,6 +289,9 @@ fun LibreNavHost(
                     adFilterEnabled = settings.adFilterEnabled,
                     onProgress = { position, duration ->
                         playerVm.saveProgress(current, position, duration)
+                    },
+                    onProgressFinal = { position, duration ->
+                        playerVm.saveProgress(current, position, duration, force = true)
                     },
                     onBack = { navController.popBackStack() },
                     onNextEpisode = if (curIdx < eps.size - 1) {
@@ -341,6 +371,8 @@ fun LibreNavHost(
             val settings by settingsVm.settings.collectAsState()
             val entries by container.sourceEntries.collectAsState()
             val importState by settingsVm.importState.collectAsState()
+            val favorites by container.favoriteEntries.collectAsState()
+            val storageUsage by settingsVm.storageUsage.collectAsState()
             SettingsScreen(
                 adFilterEnabled = settings.adFilterEnabled,
                 badgeVisibility = settings.badgeVisibility,
@@ -348,18 +380,34 @@ fun LibreNavHost(
                 enabledSourceCount = entries.count { it.enabled },
                 debugLogEnabled = settings.debugLogEnabled,
                 skipMarksEnabled = settings.skipMarksEnabled,
+                harvestEnabled = settings.harvestEnabled,
+                harvestIntensityLabel = settings.harvestIntensity.label,
+                storageBytes = storageUsage.first,
+                catalogCount = storageUsage.second,
+                favoriteCount = favorites.size,
                 importState = importState,
                 onToggleAdFilter = { settingsVm.setAdFilterEnabled(!settings.adFilterEnabled) },
                 onToggleBadge = { tag, visible -> settingsVm.setBadgeVisible(tag, visible) },
                 onToggleDebugLog = { settingsVm.setDebugLogEnabled(!settings.debugLogEnabled) },
                 onToggleSkipMarks = { settingsVm.setSkipMarksEnabled(!settings.skipMarksEnabled) },
+                onToggleHarvest = { settingsVm.setHarvestEnabled(!settings.harvestEnabled) },
+                onCycleHarvestIntensity = {
+                    val next = when (settings.harvestIntensity) {
+                        com.libretv.tv.data.HarvestIntensity.RUNNING_ONLY -> com.libretv.tv.data.HarvestIntensity.PERIODIC
+                        com.libretv.tv.data.HarvestIntensity.PERIODIC -> com.libretv.tv.data.HarvestIntensity.AGGRESSIVE
+                        com.libretv.tv.data.HarvestIntensity.AGGRESSIVE -> com.libretv.tv.data.HarvestIntensity.RUNNING_ONLY
+                    }
+                    settingsVm.setHarvestIntensity(next)
+                },
+                onClearCache = { settingsVm.clearCache() },
                 onExportBackup = { settingsVm.exportBackup() },
                 onImportBackupText = { settingsVm.importBackupText(it) },
                 onImportOptionsChange = { settingsVm.setImportOptions(it) },
                 onConfirmImport = { settingsVm.confirmImport() },
                 onDismissImport = { settingsVm.dismissImport() },
                 onOpenSources = { navController.navigate(Routes.SOURCES) },
-                onOpenSkipMarks = { navController.navigate(Routes.SKIP_MARKS) }
+                onOpenSkipMarks = { navController.navigate(Routes.SKIP_MARKS) },
+                onOpenFavorites = { navController.navigate(Routes.FAVORITES) }
             )
         }
 
@@ -368,6 +416,22 @@ fun LibreNavHost(
             SkipMarksScreen(
                 marks = marks,
                 onDelete = { container.removeSkipMark(it) },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Routes.FAVORITES) {
+            val favorites by container.favoriteEntries.collectAsState()
+            FavoritesScreen(
+                favorites = favorites,
+                onOpen = { entry ->
+                    // 收藏不强制绑定来源（D9）：以片名发起搜索，进结果页当场选源。
+                    // 播放地址不落库，无法凭收藏直接起播，这是刻意的设计取舍。
+                    val keyword = entry.title.ifBlank { entry.titleKey }
+                    container.beginSearch(keyword)
+                    navController.navigate(Routes.RESULT)
+                },
+                onRemove = { container.removeFavorite(it.titleKey) },
                 onBack = { navController.popBackStack() }
             )
         }

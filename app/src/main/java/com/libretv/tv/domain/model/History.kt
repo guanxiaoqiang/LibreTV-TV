@@ -6,6 +6,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class WatchRecord(
     val key: String = "",
+    /** 归一化片名（local-first-storage 4.1）：跨来源聚合的键。 */
+    val titleKey: String = "",
     val title: String = "",
     val poster: String = "",
     val sourceName: String = "",

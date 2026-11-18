@@ -33,6 +33,36 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     /** 跳过标记总开关。 */
     fun setSkipMarksEnabled(enabled: Boolean) = container.setSkipMarksEnabled(enabled)
 
+    /** 后台采集总开关（7.2）。 */
+    fun setHarvestEnabled(enabled: Boolean) = container.setHarvestEnabled(enabled)
+
+    /** 采集强度（7.2）。 */
+    fun setHarvestIntensity(intensity: com.libretv.tv.data.HarvestIntensity) =
+        container.setHarvestIntensity(intensity)
+
+    /** 本地缓存占用（字节）与目录条目数（7.3）。 */
+    private val _storageUsage = MutableStateFlow(0L to 0)
+    val storageUsage: StateFlow<Pair<Long, Int>> = _storageUsage.asStateFlow()
+
+    init {
+        refreshStorageUsage()
+    }
+
+    fun refreshStorageUsage() {
+        viewModelScope.launch {
+            runCatching { _storageUsage.value = container.storageUsage() }
+        }
+    }
+
+    /** 只清缓存，不动历史与收藏（7.3）。 */
+    fun clearCache() {
+        viewModelScope.launch {
+            runCatching { container.clearCacheOnly() }
+            refreshStorageUsage()
+            container.message("缓存已清理，历史与收藏未受影响")
+        }
+    }
+
     /** 导出备份（文件写好后交给系统分享）。 */
     fun exportBackup() = container.exportBackupFile()
 

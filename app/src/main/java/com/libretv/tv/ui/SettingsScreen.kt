@@ -50,18 +50,27 @@ fun SettingsScreen(
     enabledSourceCount: Int,
     debugLogEnabled: Boolean,
     skipMarksEnabled: Boolean,
+    harvestEnabled: Boolean,
+    harvestIntensityLabel: String,
+    storageBytes: Long,
+    catalogCount: Int,
+    favoriteCount: Int,
     importState: BackupImportState,
     onToggleAdFilter: () -> Unit,
     onToggleBadge: (BadgeTag, Boolean) -> Unit,
     onToggleDebugLog: () -> Unit,
     onToggleSkipMarks: () -> Unit,
+    onToggleHarvest: () -> Unit,
+    onCycleHarvestIntensity: () -> Unit,
+    onClearCache: () -> Unit,
     onExportBackup: () -> Unit,
     onImportBackupText: (String) -> Unit,
     onImportOptionsChange: (BackupMergeOptions) -> Unit,
     onConfirmImport: () -> Unit,
     onDismissImport: () -> Unit,
     onOpenSources: () -> Unit,
-    onOpenSkipMarks: () -> Unit
+    onOpenSkipMarks: () -> Unit,
+    onOpenFavorites: () -> Unit
 ) {
     val context = LocalContext.current
     val importLauncher = rememberLauncherForActivityResult(
@@ -202,6 +211,40 @@ fun SettingsScreen(
                 badge = "管理",
                 onClick = onOpenSkipMarks
             )
+
+            SectionLabel("我的收藏", "$favoriteCount 部影片")
+
+            SettingsEntryRow(
+                title = "收藏列表",
+                description = "查看已收藏的影片，进入选源播放或取消收藏",
+                badge = "$favoriteCount",
+                onClick = onOpenFavorites
+            )
+
+            SectionLabel("后台采集", "本地目录更新")
+
+            SettingsToggleRow(
+                title = "后台采集",
+                description = "关闭后不再采集目录内容，也不会补采搜索结果；不影响手动搜索与播放",
+                value = harvestEnabled,
+                onToggle = onToggleHarvest
+            )
+
+            SettingsEntryRow(
+                title = "采集强度",
+                description = "决定采集触发时机：仅运行时 / 定期 / 积极",
+                badge = harvestIntensityLabel,
+                onClick = onCycleHarvestIntensity
+            )
+
+            SectionLabel("本地占用", "缓存与目录")
+
+            SettingsEntryRow(
+                title = "本地缓存占用",
+                description = "缓存 ${formatBytes(storageBytes)}，目录 $catalogCount 条；清理只删缓存，不动历史与收藏",
+                badge = "清理",
+                onClick = onClearCache
+            )
         }
     }
 
@@ -222,6 +265,14 @@ fun SettingsScreen(
 
         else -> Unit
     }
+}
+
+/** 字节数 → 人类可读。 */
+private fun formatBytes(bytes: Long): String = when {
+    bytes <= 0L -> "0"
+    bytes < 1024L -> "$bytes B"
+    bytes < 1024L * 1024L -> "${bytes / 1024L} KB"
+    else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
 }
 
 /** Small heading that separates groups of settings. */
